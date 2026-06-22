@@ -1,0 +1,390 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ══════════════════════════════════════
+// ENUMS
+// ══════════════════════════════════════
+
+enum Rol {
+  DIRECTOR
+  SECRETARIA
+  DOCENTE
+  ESTUDIANTE
+  TUTOR
+}
+
+enum Resultado {
+  PENDIENTE
+  PROMOVIDO
+  REPROBADO
+}
+
+enum DiaSemana {
+  LUNES
+  MARTES
+  MIERCOLES
+  JUEVES
+  VIERNES
+  SABADO
+}
+
+enum EstadoAsistencia {
+  PRESENTE
+  AUSENTE
+  JUSTIFICADO
+}
+
+enum MetodoPago {
+  EFECTIVO
+  TRANSFERENCIA
+  QR
+}
+
+enum EstadoPago {
+  PAGADO
+  PENDIENTE
+  ANULADO
+}
+
+// ══════════════════════════════════════
+// AUTENTICACIÓN
+// ══════════════════════════════════════
+
+model Usuario {
+  id            Int      @id @default(autoincrement())
+  username      String   @unique
+  passwordHash  String
+  rol           Rol
+  activo        Boolean  @default(true)
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  docente          Docente?
+  estudiante       Estudiante?
+  tutor            Tutor?
+  pagosRegistrados Pago[]
+}
+
+// ══════════════════════════════════════
+// PERSONAS
+// ══════════════════════════════════════
+
+model Docente {
+  id           Int     @id @default(autoincrement())
+  ci           String  @unique
+  nombre       String
+  apellido     String
+  especialidad String?
+  telefono     String?
+  email        String?
+  activo       Boolean @default(true)
+
+  usuarioId    Int?     @unique
+  usuario      Usuario? @relation(fields: [usuarioId], references: [id])
+
+  asignaciones DocenteMateriaCurso[]
+}
+
+model Estudiante {
+  id              Int       @id @default(autoincrement())
+  ci              String    @unique
+  nombre          String
+  apellido        String
+  fechaNacimiento DateTime?
+  direccion       String?
+  activo          Boolean   @default(true)
+
+  usuarioId     Int?     @unique
+  usuario       Usuario? @relation(fields: [usuarioId], references: [id])
+
+  inscripciones Inscripcion[]
+  tutores       TutorEstudiante[]
+}
+
+model Tutor {
+  id         Int     @id @default(autoincrement())
+  ci         String  @unique
+  nombre     String
+  apellido   String
+  telefono   String?
+  email      String?
+  parentesco String?
+
+  usuarioId   Int?     @unique
+  usuario     Usuario? @relation(fields: [usuarioId], references: [id])
+
+  estudiantes TutorEstudiante[]
+}
+
+model TutorEstudiante {
+  id           Int @id @default(autoincrement())
+  tutorId      Int
+  estudianteId Int
+
+  tutor      Tutor      @relation(fields: [tutorId], references: [id])
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id])
+
+  @@unique([tutorId, estudianteId])
+}
+
+// ══════════════════════════════════════
+// ESTRUCTURA ACADÉMICA
+// ══════════════════════════════════════
+
+model Gestion {
+  id          Int       @id @default(autoincrement())
+  anio        Int       @unique
+  descripcion String?
+  activa      Boolean   @default(false)
+  fechaInicio DateTime?
+  fechaFin    DateTime?
+
+  cursos        Curso[]
+  trimestres    Trimestre[]
+  inscripciones Inscripcion[]
+  asignaciones  DocenteMateriaCurso[]
+  conceptosPago ConceptoPago[]
+}
+
+model Curso {
+  id       Int    @id @default(autoincrement())
+  nombre   String
+  nivel    String
+  paralelo String
+
+  gestionId Int
+  gestion   Gestion @relation(fields: [gestionId], references: [id])
+
+  inscripciones Inscripcion[]
+  asignaciones  DocenteMateriaCurso[]
+
+  @@unique([nivel, paralelo, gestionId])
+}
+
+model Materia {
+  id             Int    @id @default(autoincrement())
+  nombre         String
+  codigo         String @unique
+  horasSemanales Int    @default(4)
+
+  asignaciones DocenteMateriaCurso[]
+}
+
+model Trimestre {
+  id          Int       @id @default(autoincrement())
+  numero      Int
+  nombre      String
+  fechaInicio DateTime?
+  fechaFin    DateTime?
+  cerrado     Boolean   @default(false)
+
+  gestionId Int
+  gestion   Gestion @relation(fields: [gestionId], references: [id])
+
+  calificaciones     Calificacion[]
+  resumenAsistencias ResumenAsistencia[]
+
+  @@unique([numero, gestionId])
+}
+
+// ══════════════════════════════════════
+// INSCRIPCIÓN
+// ══════════════════════════════════════
+
+model Inscripcion {
+  id               Int       @id @default(autoincrement())
+  fechaInscripcion DateTime  @default(now())
+  resultado        Resultado @default(PENDIENTE)
+  observaciones    String?
+
+  estudianteId Int
+  cursoId      Int
+  gestionId    Int
+
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id])
+  curso      Curso      @relation(fields: [cursoId], references: [id])
+  gestion    Gestion    @relation(fields: [gestionId], references: [id])
+
+  asistencias        Asistencia[]
+  calificaciones     Calificacion[]
+  promediosFinales   PromedioFinal[]
+  resumenAsistencias ResumenAsistencia[]
+  pagos              Pago[]
+
+  @@unique([estudianteId, gestionId])
+}
+
+// ══════════════════════════════════════
+// DOCENTE - MATERIA - CURSO
+// ══════════════════════════════════════
+
+model DocenteMateriaCurso {
+  id Int @id @default(autoincrement())
+
+  docenteId Int
+  materiaId Int
+  cursoId   Int
+  gestionId Int
+
+  docente Docente @relation(fields: [docenteId], references: [id])
+  materia Materia @relation(fields: [materiaId], references: [id])
+  curso   Curso   @relation(fields: [cursoId], references: [id])
+  gestion Gestion @relation(fields: [gestionId], references: [id])
+
+  horarios           Horario[]
+  asistencias        Asistencia[]
+  calificaciones     Calificacion[]
+  promediosFinales   PromedioFinal[]
+  resumenAsistencias ResumenAsistencia[]
+  actividades        Actividad[]
+
+  @@unique([docenteId, materiaId, cursoId, gestionId])
+}
+
+// ══════════════════════════════════════
+// HORARIOS
+// ══════════════════════════════════════
+
+model Horario {
+  id         Int       @id @default(autoincrement())
+  diaSemana  DiaSemana
+  horaInicio String
+  horaFin    String
+  aula       String?
+
+  docenteMateriaCursoId Int
+  docenteMateriaCurso   DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+
+  @@unique([docenteMateriaCursoId, diaSemana, horaInicio])
+}
+
+// ══════════════════════════════════════
+// ASISTENCIA
+// ══════════════════════════════════════
+
+model Asistencia {
+  id            Int              @id @default(autoincrement())
+  fecha         DateTime
+  estado        EstadoAsistencia
+  justificacion String?
+
+  inscripcionId         Int
+  docenteMateriaCursoId Int
+
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+
+  @@unique([inscripcionId, docenteMateriaCursoId, fecha])
+}
+
+model ResumenAsistencia {
+  id               Int   @id @default(autoincrement())
+  totalClases      Int   @default(0)
+  totalPresente    Int   @default(0)
+  totalAusente     Int   @default(0)
+  totalJustificado Int   @default(0)
+  porcentaje       Float @default(0)
+
+  inscripcionId         Int
+  docenteMateriaCursoId Int
+  trimestreId           Int
+
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id])
+
+  @@unique([inscripcionId, docenteMateriaCursoId, trimestreId])
+}
+
+// ══════════════════════════════════════
+// CALIFICACIONES
+// ══════════════════════════════════════
+
+model Calificacion {
+  id                 Int      @id @default(autoincrement())
+  nota               Float
+  promedioTrimestral Float?
+  registradoEn       DateTime @default(now())
+  actualizadoEn      DateTime @updatedAt
+
+  inscripcionId         Int
+  docenteMateriaCursoId Int
+  trimestreId           Int
+
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id])
+
+  @@unique([inscripcionId, docenteMateriaCursoId, trimestreId])
+}
+
+model PromedioFinal {
+  id            Int     @id @default(autoincrement())
+  promedioFinal Float
+  aprobado      Boolean @default(false)
+
+  inscripcionId         Int
+  docenteMateriaCursoId Int
+
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+
+  @@unique([inscripcionId, docenteMateriaCursoId])
+}
+
+// ══════════════════════════════════════
+// ACTIVIDADES
+// ══════════════════════════════════════
+
+model Actividad {
+  id            Int      @id @default(autoincrement())
+  fecha         DateTime @default(now())
+  tema          String
+  descripcion   String?
+  tareaAsignada String?
+
+  docenteMateriaCursoId Int
+  docenteMateriaCurso   DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+}
+
+// ══════════════════════════════════════
+// PAGOS
+// ══════════════════════════════════════
+
+model ConceptoPago {
+  id          Int     @id @default(autoincrement())
+  nombre      String
+  descripcion String?
+  monto       Float
+  obligatorio Boolean @default(true)
+
+  gestionId Int
+  gestion   Gestion @relation(fields: [gestionId], references: [id])
+
+  pagos Pago[]
+}
+
+model Pago {
+  id            Int        @id @default(autoincrement())
+  montoPagado   Float
+  fechaPago     DateTime   @default(now())
+  metodoPago    MetodoPago @default(EFECTIVO)
+  estado        EstadoPago @default(PAGADO)
+  numeroRecibo  String?    @unique
+  observaciones String?
+  creadoEn      DateTime   @default(now())
+
+  inscripcionId   Int
+  conceptoPagoId  Int
+  registradoPorId Int?
+
+  inscripcion   Inscripcion  @relation(fields: [inscripcionId], references: [id])
+  conceptoPago  ConceptoPago @relation(fields: [conceptoPagoId], references: [id])
+  registradoPor Usuario?     @relation(fields: [registradoPorId], references: [id])
+}

@@ -1,0 +1,29 @@
+### Login
+POST http://localhost:4000/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "director",
+  "password": "admin1234"
+}
+
+###
+GET http://localhost:4000/api/auth/me
+Authorization: Bearer TU_TOKEN
+
+###
+GET http://localhost:4000/api/health
+
+### Reemplaza TOKEN con el token del login
+GET http://localhost:4000/api/auth/me
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwicm9sIjoiRElSRUNUT1IiLCJ1c2VybmFtZSI6ImRpcmVjdG9yIiwiaWF0IjoxNzgxNTUxMDgzLCJleHAiOjE3ODE1Nzk4ODN9.E0wElBfSzfuL8D3LUY5K6_bj3kjapo_aEXpGj-akasU
+
+### Login
+PUT http://localhost:4000/api/auth/password
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwicm9sIjoiRElSRUNUT1IiLCJ1c2VybmFtZSI6ImRpcmVjdG9yIiwiaWF0IjoxNzgxNTUxMDgzLCJleHAiOjE3ODE1Nzk4ODN9.E0wElBfSzfuL8D3LUY5K6_bj3kjapo_aEXpGj-akasU
+
+{
+  "passwordActual": "admin1234",
+  "passwordNueva": "nuevaPass123"
+}
