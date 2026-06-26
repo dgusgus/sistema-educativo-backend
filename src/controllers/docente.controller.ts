@@ -240,3 +240,87 @@ export const removeAsignacion = async (req: Request, res: Response): Promise<voi
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+
+// src/controllers/docente.controller.ts
+
+// GET /api/docentes/mis-cursos
+// Para qué: el docente ve todas sus asignaciones activas
+//           con los estudiantes de cada curso
+export const getMisCursos = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    // 1. Obtener el perfil del docente desde el usuario autenticado
+    const docente = await prisma.docente.findFirst({
+      where: { usuarioId: req.user!.id },
+    })
+
+    if (!docente) {
+      res.status(404).json({ error: 'Perfil de docente no encontrado' })
+      return
+    }
+
+    // 2. Buscar todas sus asignaciones en la gestión activa
+    const asignaciones = await prisma.docenteMateriaCurso.findMany({
+      where: {
+        docenteId: docente.id,
+        gestion:   { activa: true },
+      },
+      include: {
+        materia:  true,
+        gestion:  { select: { id: true, anio: true } },
+        horarios: { orderBy: { diaSemana: 'asc' } },
+        curso: {
+          include: {
+            inscripciones: {
+              include: {
+                estudiante: {
+                  select: {
+                    id:       true,
+                    nombre:   true,
+                    apellido: true,
+                    ci:       true,
+                  },
+                },
+              },
+              orderBy: { estudiante: { apellido: 'asc' } },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { curso:   { nivel:   'asc' } },
+        { materia: { nombre:  'asc' } },
+      ],
+    })
+
+    // 3. Formatear la respuesta para facilitar el uso en el frontend
+    const resultado = asignaciones.map(a => ({
+      docenteMateriaCursoId: a.id,
+      materia:  { id: a.materia.id, nombre: a.materia.nombre },
+      curso:    { id: a.curso.id,   nombre: a.curso.nombre   },
+      gestion:  a.gestion,
+      horarios: a.horarios,
+      totalEstudiantes: a.curso.inscripciones.length,
+      estudiantes: a.curso.inscripciones.map(i => ({
+        inscripcionId: i.id,
+        ...i.estudiante,
+      })),
+    }))
+
+    res.status(200).json({
+      docente: {
+        id:          docente.id,
+        nombre:      docente.nombre,
+        apellido:    docente.apellido,
+        especialidad: docente.especialidad,
+      },
+      totalAsignaciones: resultado.length,
+      asignaciones:      resultado,
+    })
+  } catch (error) {
+    console.error('[docente.getMisCursos]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}

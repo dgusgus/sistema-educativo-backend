@@ -6,6 +6,7 @@ import {
   updateDocente,
   asignarMateriaCurso,
   removeAsignacion,
+  getMisCursos,
 } from '../controllers/docente.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -17,6 +18,7 @@ router.use(authMiddleware)
 
 // Solo Director
 router.get('/', requireRol('DIRECTOR'), getDocentes)
+router.get('/mis-cursos', requireRol('DOCENTE'), getMisCursos)
 router.get('/:id', requireRol('DIRECTOR'), getDocenteById)
 router.post('/', requireRol('DIRECTOR'), createDocente)
 router.put('/:id', requireRol('DIRECTOR'), updateDocente)
