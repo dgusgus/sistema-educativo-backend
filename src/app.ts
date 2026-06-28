@@ -18,7 +18,8 @@ import actividadRoutes    from './routes/actividad.routes.js'
 import pagoRoutes         from './routes/pago.routes.js'
 import boletinRoutes      from './routes/boletin.routes.js'
 import reporteRoutes      from './routes/reporte.routes.js'
-
+import directorRoutes   from './routes/director.routes.js'
+import secretariaRoutes from './routes/secretaria.routes.js'
 
 const app: Express = express()
 
@@ -53,6 +54,9 @@ app.use('/api/docentes',      docenteRoutes)
 app.use('/api/estudiantes',   estudianteRoutes)
 app.use('/api/inscripciones', inscripcionRoutes)
 app.use('/api/tutores',       tutorRoutes)
+app.use('/api/directores',  directorRoutes)
+app.use('/api/secretarias', secretariaRoutes)
+
 
 // Académico
 app.use('/api/asistencia',    asistenciaRoutes)

@@ -6,6 +6,7 @@ interface JwtPayload {
   id: number
   rol: Rol
   username: string
+  nombre: string
 }
 
 export const authMiddleware = (

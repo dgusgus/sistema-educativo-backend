@@ -1,3 +1,7 @@
+// prisma/schema.prisma
+// Sistema Web U.E. "Los Ángeles de Nazaria Ignacia"
+// Versión actualizada — incluye Director y Secretaria como perfiles propios
+
 generator client {
   provider = "prisma-client"
   output   = "./generated/prisma"
@@ -65,15 +69,53 @@ model Usuario {
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  docente          Docente?
-  estudiante       Estudiante?
-  tutor            Tutor?
+  // Cada usuario tiene UN solo perfil según su rol
+  director   Director?
+  secretaria Secretaria?
+  docente    Docente?
+  estudiante Estudiante?
+  tutor      Tutor?
+
+  // Registro de pagos realizados por este usuario
   pagosRegistrados Pago[]
 }
 
 // ══════════════════════════════════════
-// PERSONAS
+// PERFILES — uno por rol
 // ══════════════════════════════════════
+
+model Director {
+  id       Int     @id @default(autoincrement())
+  ci       String  @unique
+  nombre   String
+  apellido String
+  telefono String?
+  email    String?
+  activo   Boolean @default(true)
+
+  // Cuenta de acceso
+  usuarioId Int     @unique
+  usuario   Usuario @relation(fields: [usuarioId], references: [id])
+
+  // Gestión que dirige — un director está a cargo de una gestión por año
+  // Permite saber quién era el director en cada boletín histórico
+  gestionId Int? @unique
+  gestion   Gestion? @relation(fields: [gestionId], references: [id])
+}
+
+model Secretaria {
+  id       Int     @id @default(autoincrement())
+  ci       String  @unique
+  nombre   String
+  apellido String
+  telefono String?
+  email    String?
+  activo   Boolean @default(true)
+
+  // Cuenta de acceso
+  usuarioId Int     @unique
+  usuario   Usuario @relation(fields: [usuarioId], references: [id])
+}
 
 model Docente {
   id           Int     @id @default(autoincrement())
@@ -85,8 +127,9 @@ model Docente {
   email        String?
   activo       Boolean @default(true)
 
-  usuarioId    Int?     @unique
-  usuario      Usuario? @relation(fields: [usuarioId], references: [id])
+  // Cuenta de acceso — opcional hasta que se le asigne una
+  usuarioId Int?    @unique
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 
   asignaciones DocenteMateriaCurso[]
 }
@@ -100,8 +143,9 @@ model Estudiante {
   direccion       String?
   activo          Boolean   @default(true)
 
-  usuarioId     Int?     @unique
-  usuario       Usuario? @relation(fields: [usuarioId], references: [id])
+  // Cuenta de acceso — opcional hasta que se le asigne una
+  usuarioId Int?    @unique
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 
   inscripciones Inscripcion[]
   tutores       TutorEstudiante[]
@@ -116,8 +160,9 @@ model Tutor {
   email      String?
   parentesco String?
 
-  usuarioId   Int?     @unique
-  usuario     Usuario? @relation(fields: [usuarioId], references: [id])
+  // Cuenta de acceso — opcional hasta que se le asigne una
+  usuarioId Int?    @unique
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 
   estudiantes TutorEstudiante[]
 }
@@ -145,6 +190,8 @@ model Gestion {
   fechaInicio DateTime?
   fechaFin    DateTime?
 
+  // Director a cargo de esta gestión
+  director      Director?
   cursos        Curso[]
   trimestres    Trimestre[]
   inscripciones Inscripcion[]
@@ -221,7 +268,9 @@ model Inscripcion {
 }
 
 // ══════════════════════════════════════
-// DOCENTE - MATERIA - CURSO
+// DOCENTE — MATERIA — CURSO
+// Núcleo del sistema académico
+// "Juan Mamani da Matemáticas en 1ro Sec A en 2025"
 // ══════════════════════════════════════
 
 model DocenteMateriaCurso {
@@ -384,7 +433,7 @@ model Pago {
   conceptoPagoId  Int
   registradoPorId Int?
 
-  inscripcion   Inscripcion  @relation(fields: [inscripcionId], references: [id])
-  conceptoPago  ConceptoPago @relation(fields: [conceptoPagoId], references: [id])
+  inscripcion   Inscripcion  @relation(fields: [inscripcionId],   references: [id])
+  conceptoPago  ConceptoPago @relation(fields: [conceptoPagoId],  references: [id])
   registradoPor Usuario?     @relation(fields: [registradoPorId], references: [id])
 }

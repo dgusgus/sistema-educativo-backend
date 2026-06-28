@@ -7,6 +7,7 @@ declare global {
         id: number
         rol: Rol
         username: string
+        nombre:   string
       }
     }
   }

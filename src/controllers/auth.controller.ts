@@ -47,34 +47,42 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     }
 
     // Obtener nombre según el rol
-    const perfil =
-      usuario.docente ??
-      usuario.estudiante ??
-      usuario.tutor ??
-      null
+    // En login (auth.controller.ts), buscar el perfil según el rol
+    const perfil = await (() => {
+      switch (usuario.rol) {
+        case 'DIRECTOR': return prisma.director.findFirst({ where: { usuarioId: usuario.id } })
+        case 'SECRETARIA': return prisma.secretaria.findFirst({ where: { usuarioId: usuario.id } })
+        case 'DOCENTE': return prisma.docente.findFirst({ where: { usuarioId: usuario.id } })
+        case 'ESTUDIANTE': return prisma.estudiante.findFirst({ where: { usuarioId: usuario.id } })
+        case 'TUTOR': return prisma.tutor.findFirst({ where: { usuarioId: usuario.id } })
+        default: return Promise.resolve(null)
+      }
+    })()
 
     const nombre = perfil
-      ? `${perfil.nombre} ${perfil.apellido}`
+      ? `${(perfil as any).nombre} ${(perfil as any).apellido}`
       : usuario.username
 
-    // Generar token JWT
+    // Incluir en el JWT
     const token = jwt.sign(
       {
-        id:       usuario.id,
-        rol:      usuario.rol,
+        id: usuario.id,
+        rol: usuario.rol,
         username: usuario.username,
+        nombre,
       },
       process.env.JWT_SECRET ?? 'secret',
       { expiresIn: (process.env.JWT_EXPIRES_IN ?? '8h') as SignOptions['expiresIn'], }
     )
 
+    // Y retornarlo en la respuesta del login
     res.status(200).json({
       token,
       usuario: {
-        id:       usuario.id,
+        id: usuario.id,
         username: usuario.username,
-        rol:      usuario.rol,
-        nombre,
+        rol: usuario.rol,
+        nombre,                      // ← el frontend lo usa en el sidebar
       },
     })
   } catch (error) {
