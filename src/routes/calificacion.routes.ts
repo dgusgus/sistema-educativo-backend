@@ -5,6 +5,7 @@ import {
   updateCalificacion,
   cerrarTrimestre,
   getCalificacionesEstudiante,
+  getHistorialCalificacion,
 } from '../controllers/calificacion.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -34,6 +35,12 @@ router.get(
   '/estudiante',
   requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR'),
   getCalificacionesEstudiante
+)
+
+router.get(
+  '/:id/historial',
+  requireRol('DIRECTOR', 'SECRETARIA'),
+  getHistorialCalificacion
 )
 
 export default router

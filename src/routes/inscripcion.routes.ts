@@ -4,6 +4,7 @@ import {
   inscribirEstudiante,
   getInscripcion,
   registrarResultado,
+  cambiarEstadoInscripcion,
 } from '../controllers/estudiante.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -26,6 +27,12 @@ router.post(
   '/:id/resultado',
   requireRol('SECRETARIA', 'DIRECTOR'),
   registrarResultado
+)
+
+router.put(
+  '/:id/estado',
+  requireRol('SECRETARIA', 'DIRECTOR'),
+  cambiarEstadoInscripcion
 )
 
 export default router

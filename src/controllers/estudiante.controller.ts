@@ -3,10 +3,11 @@ import { prisma } from '../lib/prisma.js'
 
 // ─── GET /api/estudiantes ─────────────────────────────────────────────────────
 export const getEstudiantes = async (req: Request, res: Response): Promise<void> => {
-  const { search, cursoId, gestionId } = req.query as {
+  const { search, cursoId, gestionId, estadoInscripcion } = req.query as {
     search?:    string
     cursoId?:   string
     gestionId?: string
+    estadoInscripcion?: string
   }
 
   try {
@@ -20,11 +21,12 @@ export const getEstudiantes = async (req: Request, res: Response): Promise<void>
               { ci:       { contains: search } },
             ]
           : undefined,
-        inscripciones: cursoId || gestionId
+        inscripciones: cursoId || gestionId || estadoInscripcion
           ? {
               some: {
                 ...(cursoId   && { cursoId:   Number(cursoId) }),
                 ...(gestionId && { gestionId: Number(gestionId) }),
+                ...(estadoInscripcion && { estado: estadoInscripcion }),
               },
             }
           : undefined,
@@ -326,6 +328,67 @@ export const registrarResultado = async (req: Request, res: Response): Promise<v
     res.status(200).json(updated)
   } catch (error) {
     console.error('[estudiante.registrarResultado]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// En inscribirEstudiante — el campo estadoInscripcion se agrega automáticamente
+// como ACTIVA por defecto en el schema, no necesitas cambiarlo.
+
+// NUEVO endpoint — PUT /api/inscripciones/:id/estado
+// Para registrar retiro o transferencia de un estudiante
+export const cambiarEstadoInscripcion = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const id = Number(req.params.id)
+  const { estadoInscripcion, fechaRetiro, observaciones } = req.body as {
+    estadoInscripcion?: 'ACTIVA' | 'RETIRADA' | 'TRANSFERIDA' | 'CONCLUIDA'
+    fechaRetiro?: string
+    observaciones?: string
+  }
+
+  if (!estadoInscripcion) {
+    res.status(400).json({ error: 'estadoInscripcion es obligatorio' })
+    return
+  }
+
+  const estadosValidos = ['ACTIVA', 'RETIRADA', 'TRANSFERIDA', 'CONCLUIDA']
+  if (!estadosValidos.includes(estadoInscripcion)) {
+    res.status(400).json({
+      error: `Estado inválido. Opciones: ${estadosValidos.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const inscripcion = await prisma.inscripcion.findUnique({ where: { id } })
+    if (!inscripcion) {
+      res.status(404).json({ error: 'Inscripción no encontrada' })
+      return
+    }
+
+    // Si se retira o transfiere, registrar la fecha
+    const necesitaFecha = ['RETIRADA', 'TRANSFERIDA'].includes(estadoInscripcion)
+
+    const actualizada = await prisma.inscripcion.update({
+      where: { id },
+      data: {
+        estadoInscripcion,
+        fechaRetiro: necesitaFecha
+          ? (fechaRetiro ? new Date(fechaRetiro) : new Date())
+          : null,
+        ...(observaciones !== undefined && { observaciones }),
+      },
+      include: {
+        estudiante: { select: { nombre: true, apellido: true } },
+        curso:      { select: { nombre: true } },
+      },
+    })
+
+    res.status(200).json(actualizada)
+  } catch (error) {
+    console.error('[estudiante.cambiarEstadoInscripcion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }

@@ -20,6 +20,7 @@ import boletinRoutes      from './routes/boletin.routes.js'
 import reporteRoutes      from './routes/reporte.routes.js'
 import directorRoutes   from './routes/director.routes.js'
 import secretariaRoutes from './routes/secretaria.routes.js'
+import institucionRoutes from './routes/institucion.routes.js'
 
 const app: Express = express()
 
@@ -70,4 +71,6 @@ app.use('/api/pagos',         pagoRoutes)
 app.use('/api/boletin',       boletinRoutes)
 app.use('/api',               reporteRoutes)
 
+// Institución
+app.use('/api/institucion', institucionRoutes)
 export default app

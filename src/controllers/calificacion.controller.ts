@@ -201,9 +201,15 @@ export const registrarCalificaciones = async (req: Request, res: Response): Prom
 
 // ─── PUT /api/calificaciones/:id ──────────────────────────────────────────────
 // Editar una nota individual antes del cierre del trimestre
-export const updateCalificacion = async (req: Request, res: Response): Promise<void> => {
+export const updateCalificacion = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   const id   = Number(req.params.id)
-  const { nota } = req.body as { nota?: number }
+  const { nota, motivo } = req.body as {
+    nota?:   number
+    motivo?: string  // ← nuevo campo
+  }
 
   if (nota === undefined || nota < 1 || nota > 100) {
     res.status(400).json({ error: 'nota debe estar entre 1 y 100 (Ley 070)' })
@@ -212,7 +218,7 @@ export const updateCalificacion = async (req: Request, res: Response): Promise<v
 
   try {
     const calificacion = await prisma.calificacion.findUnique({
-      where: { id },
+      where:   { id },
       include: { trimestre: true },
     })
 
@@ -228,15 +234,32 @@ export const updateCalificacion = async (req: Request, res: Response): Promise<v
       return
     }
 
-    const updated = await prisma.calificacion.update({
-      where: { id },
-      data: { nota, promedioTrimestral: nota },
-    })
+    // Guardar en historial + actualizar nota en una transacción
+    const [historial, calificacionActualizada] = await prisma.$transaction([
+      // 1. Registrar el cambio en el historial
+      prisma.historialCalificacion.create({
+        data: {
+          notaAnterior:  calificacion.nota,
+          notaNueva:     nota,
+          motivo:        motivo ?? 'Sin motivo especificado',
+          usuarioId:     req.user!.id,
+          calificacionId: id,
+        },
+      }),
+      // 2. Actualizar la nota
+      prisma.calificacion.update({
+        where: { id },
+        data:  { nota, promedioTrimestral: nota },
+      }),
+    ])
 
     // Recalcular promedios finales
     await calcularPromediosFinales(calificacion.docenteMateriaCursoId)
 
-    res.status(200).json(updated)
+    res.status(200).json({
+      calificacion: calificacionActualizada,
+      historial,
+    })
   } catch (error) {
     console.error('[calificacion.updateCalificacion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -429,5 +452,29 @@ async function calcularPromediosFinales(docenteMateriaCursoId: number) {
       update: { promedioFinal, aprobado },
       create: { inscripcionId, docenteMateriaCursoId, promedioFinal, aprobado },
     })
+  }
+}
+
+// NUEVO endpoint — GET /api/calificaciones/:id/historial
+// El Director puede ver todos los cambios de una calificación
+export const getHistorialCalificacion = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const id = Number(req.params.id)
+
+  try {
+    const historial = await prisma.historialCalificacion.findMany({
+      where:   { calificacionId: id },
+      include: {
+        usuario: { select: { id: true, username: true, rol: true } },
+      },
+      orderBy: { fecha: 'desc' },
+    })
+
+    res.status(200).json(historial)
+  } catch (error) {
+    console.error('[calificacion.getHistorialCalificacion]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
