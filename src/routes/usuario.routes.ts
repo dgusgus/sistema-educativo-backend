@@ -7,6 +7,7 @@ import {
   resetearPassword,
   deleteUsuario,
   vincularPerfil,
+  createUsuarioConPerfil,
 } from '../controllers/usuario.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -20,6 +21,14 @@ router.get(
   requireRol('DIRECTOR'),
   getUsuarios
 )
+
+// IMPORTANTE: /con-perfil debe ir ANTES de /:id
+router.post(
+  '/con-perfil',
+  requireRol('DIRECTOR', 'SECRETARIA'),
+  createUsuarioConPerfil
+)
+
 router.get(
   '/:id',
   requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR'),

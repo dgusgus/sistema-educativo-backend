@@ -401,3 +401,230 @@ export const vincularPerfil = async (req: Request, res: Response): Promise<void>
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+
+
+
+// src/controllers/usuario.controller.ts
+// Agregar este endpoint
+
+// POST /api/usuarios/con-perfil
+export const createUsuarioConPerfil = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const { rol, username, password, perfil } = req.body as {
+    rol?: Rol
+    username?: string
+    password?: string
+    perfil?: Record<string, any>
+  }
+
+  // Validaciones básicas
+  if (!rol || !username || !password || !perfil) {
+    res.status(400).json({
+      error: 'rol, username, password y perfil son obligatorios',
+    })
+    return
+  }
+
+  if (password.length < 6) {
+    res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' })
+    return
+  }
+
+  // Validar que el rol sea válido
+  const rolesValidos: Rol[] = ['DIRECTOR','SECRETARIA','DOCENTE','ESTUDIANTE','TUTOR']
+  if (!rolesValidos.includes(rol)) {
+    res.status(400).json({ error: `Rol inválido. Opciones: ${rolesValidos.join(', ')}` })
+    return
+  }
+
+  // Control de acceso — quién puede crear qué rol
+  if (req.user?.rol === 'SECRETARIA') {
+    if (!['ESTUDIANTE', 'TUTOR'].includes(rol)) {
+      res.status(403).json({
+        error: 'La Secretaria solo puede crear cuentas con rol ESTUDIANTE o TUTOR',
+      })
+      return
+    }
+  }
+
+  // Validar campos obligatorios según el rol
+  const errores = validarPerfil(rol, perfil)
+  if (errores) {
+    res.status(400).json({ error: errores })
+    return
+  }
+
+  try {
+    // Verificar username único
+    const userExiste = await prisma.usuario.findUnique({ where: { username } })
+    if (userExiste) {
+      res.status(409).json({ error: `El username "${username}" ya está en uso` })
+      return
+    }
+
+    // Verificar CI único en la tabla correspondiente
+    const ciExiste = await verificarCIUnico(rol, perfil.ci)
+    if (ciExiste) {
+      res.status(409).json({ error: `Ya existe un ${rol.toLowerCase()} con el CI ${perfil.ci}` })
+      return
+    }
+
+    // Validaciones específicas por rol
+    if (rol === 'DIRECTOR' && perfil.gestionId) {
+      const gestionOcupada = await prisma.director.findFirst({
+        where: { gestionId: perfil.gestionId },
+      })
+      if (gestionOcupada) {
+        res.status(409).json({
+          error: `La gestión ya tiene asignado a ${gestionOcupada.nombre} ${gestionOcupada.apellido}`,
+        })
+        return
+      }
+    }
+
+    // Crear usuario + perfil en una sola transacción
+    const resultado = await prisma.$transaction(async tx => {
+      // 1. Crear el usuario
+      const usuario = await tx.usuario.create({
+        data: {
+          username,
+          passwordHash: await bcrypt.hash(password, 12),
+          rol,
+          activo: true,
+        },
+      })
+
+      // 2. Crear el perfil según el rol
+      const perfilCreado = await crearPerfil(tx, rol, perfil, usuario.id)
+
+      return { usuario, perfil: perfilCreado }
+    })
+
+    res.status(201).json({
+      usuario: {
+        id:       resultado.usuario.id,
+        username: resultado.usuario.username,
+        rol:      resultado.usuario.rol,
+      },
+      perfil:  resultado.perfil,
+      credenciales: {
+        username,
+        password,
+        nota: 'Comparte estas credenciales de forma segura',
+      },
+    })
+  } catch (error) {
+    console.error('[usuario.createUsuarioConPerfil]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// ─── Helpers internos ─────────────────────────────────────────────────────────
+
+// Valida campos obligatorios según el rol
+function validarPerfil(rol: Rol, perfil: Record<string, any>): string | null {
+  if (!perfil.ci)      return 'El campo ci es obligatorio'
+  if (!perfil.nombre)  return 'El campo nombre es obligatorio'
+  if (!perfil.apellido) return 'El campo apellido es obligatorio'
+
+  if (rol === 'DOCENTE' && !perfil.especialidad) {
+    // especialidad no es obligatorio pero lo alertamos
+  }
+
+  return null
+}
+
+// Verifica CI único en la tabla correspondiente al rol
+async function verificarCIUnico(rol: Rol, ci: string): Promise<boolean> {
+  switch (rol) {
+    case 'DIRECTOR':
+      return !!(await prisma.director.findUnique({ where: { ci } }))
+    case 'SECRETARIA':
+      return !!(await prisma.secretaria.findUnique({ where: { ci } }))
+    case 'DOCENTE':
+      return !!(await prisma.docente.findUnique({ where: { ci } }))
+    case 'ESTUDIANTE':
+      return !!(await prisma.estudiante.findUnique({ where: { ci } }))
+    case 'TUTOR':
+      return !!(await prisma.tutor.findUnique({ where: { ci } }))
+    default:
+      return false
+  }
+}
+
+// Crea el perfil en la tabla correcta según el rol
+async function crearPerfil(
+  tx: any,
+  rol: Rol,
+  perfil: Record<string, any>,
+  usuarioId: number
+) {
+  switch (rol) {
+    case 'DIRECTOR':
+      return tx.director.create({
+        data: {
+          ci:        perfil.ci,
+          nombre:    perfil.nombre,
+          apellido:  perfil.apellido,
+          telefono:  perfil.telefono,
+          email:     perfil.email,
+          gestionId: perfil.gestionId ?? null,
+          usuarioId,
+        },
+      })
+
+    case 'SECRETARIA':
+      return tx.secretaria.create({
+        data: {
+          ci:       perfil.ci,
+          nombre:   perfil.nombre,
+          apellido: perfil.apellido,
+          telefono: perfil.telefono,
+          email:    perfil.email,
+          usuarioId,
+        },
+      })
+
+    case 'DOCENTE':
+      return tx.docente.create({
+        data: {
+          ci:          perfil.ci,
+          nombre:      perfil.nombre,
+          apellido:    perfil.apellido,
+          especialidad: perfil.especialidad,
+          telefono:    perfil.telefono,
+          email:       perfil.email,
+          usuarioId,
+        },
+      })
+
+    case 'ESTUDIANTE':
+      return tx.estudiante.create({
+        data: {
+          ci:             perfil.ci,
+          nombre:         perfil.nombre,
+          apellido:       perfil.apellido,
+          fechaNacimiento: perfil.fechaNacimiento
+            ? new Date(perfil.fechaNacimiento)
+            : null,
+          direccion: perfil.direccion,
+          usuarioId,
+        },
+      })
+
+    case 'TUTOR':
+      return tx.tutor.create({
+        data: {
+          ci:        perfil.ci,
+          nombre:    perfil.nombre,
+          apellido:  perfil.apellido,
+          telefono:  perfil.telefono,
+          email:     perfil.email,
+          parentesco: perfil.parentesco,
+          usuarioId,
+        },
+      })
+  }
+}
