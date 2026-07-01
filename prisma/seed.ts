@@ -1,9 +1,9 @@
 // prisma/seed.ts
-// Seed FINAL — incluye Institución, EstadoInscripcion, HistorialCalificacion
+// Seed FINAL CORREGIDO — Director↔Gestión invertido
 // Ejecutar: pnpm db:seed
 
 import bcrypt from 'bcryptjs'
-import { PrismaClient } from './generated/prisma/client.js'
+import { PrismaClient } from './generated/prisma/client'
 import { PrismaPg } from '@prisma/adapter-pg'
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL ?? '' })
@@ -12,12 +12,10 @@ const prisma  = new PrismaClient({ adapter })
 const hash = async (p: string) => bcrypt.hash(p, 12)
 
 async function main() {
-  console.log('🌱 Iniciando seed final...\n')
+  console.log('🌱 Iniciando seed final corregido...\n')
 
   // ══════════════════════════════════════
   // INSTITUCIÓN
-  // ¿Por qué primero? El boletín PDF la necesita
-  // para los encabezados dinámicos
   // ══════════════════════════════════════
   await prisma.institucion.upsert({
     where:  { id: 1 },
@@ -36,7 +34,7 @@ async function main() {
   console.log('✓ Institución configurada')
 
   // ══════════════════════════════════════
-  // GESTIÓN ACTIVA
+  // GESTIÓN (sin director aún — se asigna después)
   // ══════════════════════════════════════
   const gestion = await prisma.gestion.upsert({
     where:  { anio: 2025 },
@@ -49,7 +47,7 @@ async function main() {
       fechaFin:    new Date('2025-11-28'),
     },
   })
-  console.log(`✓ Gestión ${gestion.anio}`)
+  console.log(`✓ Gestión ${gestion.anio} (sin director aún)`)
 
   // ══════════════════════════════════════
   // TRIMESTRES
@@ -58,17 +56,17 @@ async function main() {
     prisma.trimestre.upsert({
       where:  { numero_gestionId: { numero: 1, gestionId: gestion.id } },
       update: {},
-      create: { numero: 1, nombre: 'Primer Trimestre',   gestionId: gestion.id, fechaInicio: new Date('2025-02-03'), fechaFin: new Date('2025-05-02'), cerrado: true  },
+      create: { numero: 1, nombre: 'Primer Trimestre',  gestionId: gestion.id, fechaInicio: new Date('2025-02-03'), fechaFin: new Date('2025-05-02'), cerrado: true  },
     }),
     prisma.trimestre.upsert({
       where:  { numero_gestionId: { numero: 2, gestionId: gestion.id } },
       update: {},
-      create: { numero: 2, nombre: 'Segundo Trimestre',  gestionId: gestion.id, fechaInicio: new Date('2025-05-05'), fechaFin: new Date('2025-08-01'), cerrado: false },
+      create: { numero: 2, nombre: 'Segundo Trimestre', gestionId: gestion.id, fechaInicio: new Date('2025-05-05'), fechaFin: new Date('2025-08-01'), cerrado: false },
     }),
     prisma.trimestre.upsert({
       where:  { numero_gestionId: { numero: 3, gestionId: gestion.id } },
       update: {},
-      create: { numero: 3, nombre: 'Tercer Trimestre',   gestionId: gestion.id, fechaInicio: new Date('2025-08-04'), fechaFin: new Date('2025-11-28'), cerrado: false },
+      create: { numero: 3, nombre: 'Tercer Trimestre',  gestionId: gestion.id, fechaInicio: new Date('2025-08-04'), fechaFin: new Date('2025-11-28'), cerrado: false },
     }),
   ])
   console.log('✓ 3 trimestres (T1 cerrado)')
@@ -77,13 +75,13 @@ async function main() {
   // CURSOS
   // ══════════════════════════════════════
   const [c1A, c1B, c2A] = await Promise.all([
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Primero Secundaria',  paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Primero Secundaria A',  nivel: 'Primero Secundaria',  paralelo: 'A', gestionId: gestion.id } }),
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Primero Secundaria',  paralelo: 'B', gestionId: gestion.id } }, update: {}, create: { nombre: 'Primero Secundaria B',  nivel: 'Primero Secundaria',  paralelo: 'B', gestionId: gestion.id } }),
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Segundo Secundaria',  paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Segundo Secundaria A',  nivel: 'Segundo Secundaria',  paralelo: 'A', gestionId: gestion.id } }),
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Tercero Secundaria',  paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Tercero Secundaria A',  nivel: 'Tercero Secundaria',  paralelo: 'A', gestionId: gestion.id } }),
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Cuarto Secundaria',   paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Cuarto Secundaria A',   nivel: 'Cuarto Secundaria',   paralelo: 'A', gestionId: gestion.id } }),
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Quinto Secundaria',   paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Quinto Secundaria A',   nivel: 'Quinto Secundaria',   paralelo: 'A', gestionId: gestion.id } }),
-    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Sexto Secundaria',    paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Sexto Secundaria A',    nivel: 'Sexto Secundaria',    paralelo: 'A', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Primero Secundaria', paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Primero Secundaria A', nivel: 'Primero Secundaria', paralelo: 'A', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Primero Secundaria', paralelo: 'B', gestionId: gestion.id } }, update: {}, create: { nombre: 'Primero Secundaria B', nivel: 'Primero Secundaria', paralelo: 'B', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Segundo Secundaria', paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Segundo Secundaria A', nivel: 'Segundo Secundaria', paralelo: 'A', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Tercero Secundaria', paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Tercero Secundaria A', nivel: 'Tercero Secundaria', paralelo: 'A', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Cuarto Secundaria',  paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Cuarto Secundaria A',  nivel: 'Cuarto Secundaria',  paralelo: 'A', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Quinto Secundaria',  paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Quinto Secundaria A',  nivel: 'Quinto Secundaria',  paralelo: 'A', gestionId: gestion.id } }),
+    prisma.curso.upsert({ where: { nivel_paralelo_gestionId: { nivel: 'Sexto Secundaria',   paralelo: 'A', gestionId: gestion.id } }, update: {}, create: { nombre: 'Sexto Secundaria A',   nivel: 'Sexto Secundaria',   paralelo: 'A', gestionId: gestion.id } }),
   ])
   console.log('✓ 7 cursos')
 
@@ -122,7 +120,7 @@ async function main() {
   console.log('✓ 14 usuarios')
 
   // ══════════════════════════════════════
-  // DIRECTOR + SECRETARIA
+  // DIRECTOR (sin gestionId — ya no existe ese campo)
   // ══════════════════════════════════════
   const director = await prisma.director.upsert({
     where:  { ci: 'D001' },
@@ -135,10 +133,25 @@ async function main() {
       email:     'r.vargas@ue-angeles.edu.bo',
       activo:    true,
       usuarioId: uDir.id,
-      gestionId: gestion.id,
+      // ← ya NO se asigna gestionId aquí
     },
   })
+  console.log(`✓ Director: ${director.nombre} ${director.apellido} (sin gestión asignada aún)`)
 
+  // ══════════════════════════════════════
+  // ASIGNAR DIRECTOR A LA GESTIÓN
+  // ¿Por qué en este orden? Porque ahora la Gestión
+  // es quien apunta al Director, no al revés
+  // ══════════════════════════════════════
+  await prisma.gestion.update({
+    where: { id: gestion.id },
+    data:  { directorId: director.id },
+  })
+  console.log(`✓ Director ${director.nombre} asignado a la gestión ${gestion.anio}`)
+
+  // ══════════════════════════════════════
+  // SECRETARIA
+  // ══════════════════════════════════════
   const secretaria = await prisma.secretaria.upsert({
     where:  { ci: 'S001' },
     update: {},
@@ -152,7 +165,6 @@ async function main() {
       usuarioId: uSec.id,
     },
   })
-  console.log(`✓ Director: ${director.nombre} ${director.apellido}`)
   console.log(`✓ Secretaria: ${secretaria.nombre} ${secretaria.apellido}`)
 
   // ══════════════════════════════════════
@@ -182,58 +194,48 @@ async function main() {
   const tut3 = await prisma.tutor.upsert({ where: { ci: 'T003' }, update: {}, create: { ci: 'T003', nombre: 'Carmen', apellido: 'Tarqui Flores',  telefono: '79023456', email: 'carmen.tarqui@gmail.com', parentesco: 'Madre', usuarioId: uTut3.id } })
   console.log('✓ 3 tutores')
 
-  // Vínculos tutor ↔ estudiante
   const vincular = async (tutorId: number, estudianteId: number) =>
     prisma.tutorEstudiante.upsert({
       where:  { tutorId_estudianteId: { tutorId, estudianteId } },
       update: {},
       create: { tutorId, estudianteId },
     })
-  await vincular(tut1.id, est1.id)  // Rosa → Ana
-  await vincular(tut1.id, est4.id)  // Rosa → Miguel
-  await vincular(tut2.id, est2.id)  // Miguel → Pedro
-  await vincular(tut3.id, est3.id)  // Carmen → Lucía
-  await vincular(tut3.id, est5.id)  // Carmen → Valeria
+  await vincular(tut1.id, est1.id)
+  await vincular(tut1.id, est4.id)
+  await vincular(tut2.id, est2.id)
+  await vincular(tut3.id, est3.id)
+  await vincular(tut3.id, est5.id)
   console.log('✓ Vínculos tutor↔estudiante')
 
   // ══════════════════════════════════════
   // INSCRIPCIONES
-  // Incluye estadoInscripcion — nuevo campo
   // ══════════════════════════════════════
   const insc1 = await prisma.inscripcion.upsert({
-    where:  { estudianteId_gestionId: { estudianteId: est1.id, gestionId: gestion.id } },
-    update: {},
+    where: { estudianteId_gestionId: { estudianteId: est1.id, gestionId: gestion.id } }, update: {},
     create: { estudianteId: est1.id, cursoId: c1A.id, gestionId: gestion.id, estadoInscripcion: 'ACTIVA' },
   })
   const insc2 = await prisma.inscripcion.upsert({
-    where:  { estudianteId_gestionId: { estudianteId: est2.id, gestionId: gestion.id } },
-    update: {},
+    where: { estudianteId_gestionId: { estudianteId: est2.id, gestionId: gestion.id } }, update: {},
     create: { estudianteId: est2.id, cursoId: c1A.id, gestionId: gestion.id, estadoInscripcion: 'ACTIVA' },
   })
   const insc3 = await prisma.inscripcion.upsert({
-    where:  { estudianteId_gestionId: { estudianteId: est3.id, gestionId: gestion.id } },
-    update: {},
+    where: { estudianteId_gestionId: { estudianteId: est3.id, gestionId: gestion.id } }, update: {},
     create: { estudianteId: est3.id, cursoId: c1A.id, gestionId: gestion.id, estadoInscripcion: 'ACTIVA' },
   })
   const insc4 = await prisma.inscripcion.upsert({
-    where:  { estudianteId_gestionId: { estudianteId: est4.id, gestionId: gestion.id } },
-    update: {},
-    // Miguel está RETIRADO — caso de prueba para EstadoInscripcion
+    where: { estudianteId_gestionId: { estudianteId: est4.id, gestionId: gestion.id } }, update: {},
     create: {
-      estudianteId:     est4.id,
-      cursoId:          c1A.id,
-      gestionId:        gestion.id,
+      estudianteId: est4.id, cursoId: c1A.id, gestionId: gestion.id,
       estadoInscripcion: 'RETIRADA',
-      fechaRetiro:      new Date('2025-06-15'),
-      observaciones:    'Familia se trasladó a otro departamento',
+      fechaRetiro:       new Date('2025-06-15'),
+      observaciones:     'Familia se trasladó a otro departamento',
     },
   })
   const insc5 = await prisma.inscripcion.upsert({
-    where:  { estudianteId_gestionId: { estudianteId: est5.id, gestionId: gestion.id } },
-    update: {},
+    where: { estudianteId_gestionId: { estudianteId: est5.id, gestionId: gestion.id } }, update: {},
     create: { estudianteId: est5.id, cursoId: c1B.id, gestionId: gestion.id, estadoInscripcion: 'ACTIVA' },
   })
-  console.log('✓ 5 inscripciones (Miguel: RETIRADA el 15/06 — caso de prueba)')
+  console.log('✓ 5 inscripciones (Miguel: RETIRADA — caso de prueba)')
 
   // ══════════════════════════════════════
   // ASIGNACIONES DOCENTE-MATERIA-CURSO
@@ -260,10 +262,7 @@ async function main() {
   // ══════════════════════════════════════
   // ASISTENCIA T1
   // ══════════════════════════════════════
-  const fechas = [
-    '2025-02-03','2025-02-05','2025-02-10','2025-02-12','2025-02-17',
-    '2025-02-19','2025-02-24','2025-02-26','2025-03-03','2025-03-05',
-  ]
+  const fechas = ['2025-02-03','2025-02-05','2025-02-10','2025-02-12','2025-02-17','2025-02-19','2025-02-24','2025-02-26','2025-03-03','2025-03-05']
   const estadosMat = [
     ['PRESENTE','PRESENTE','PRESENTE','PRESENTE'],
     ['PRESENTE','AUSENTE', 'PRESENTE','PRESENTE'],
@@ -276,13 +275,12 @@ async function main() {
     ['PRESENTE','PRESENTE','PRESENTE','AUSENTE' ],
     ['PRESENTE','AUSENTE', 'PRESENTE','AUSENTE' ],
   ] as const
-
   const inscC1A = [insc1, insc2, insc3, insc4]
 
   for (let d = 0; d < fechas.length; d++) {
     for (let e = 0; e < inscC1A.length; e++) {
       await prisma.asistencia.upsert({
-        where: { inscripcionId_docenteMateriaCursoId_fecha: { inscripcionId: inscC1A[e].id, docenteMateriaCursoId: dmc1.id, fecha: new Date(fechas[d]) } },
+        where:  { inscripcionId_docenteMateriaCursoId_fecha: { inscripcionId: inscC1A[e].id, docenteMateriaCursoId: dmc1.id, fecha: new Date(fechas[d]) } },
         update: {},
         create: { inscripcionId: inscC1A[e].id, docenteMateriaCursoId: dmc1.id, fecha: new Date(fechas[d]), estado: estadosMat[d][e] as any },
       })
@@ -291,7 +289,7 @@ async function main() {
   for (const fecha of fechas) {
     for (const insc of inscC1A) {
       await prisma.asistencia.upsert({
-        where: { inscripcionId_docenteMateriaCursoId_fecha: { inscripcionId: insc.id, docenteMateriaCursoId: dmc2.id, fecha: new Date(fecha) } },
+        where:  { inscripcionId_docenteMateriaCursoId_fecha: { inscripcionId: insc.id, docenteMateriaCursoId: dmc2.id, fecha: new Date(fecha) } },
         update: {},
         create: { inscripcionId: insc.id, docenteMateriaCursoId: dmc2.id, fecha: new Date(fecha), estado: Math.random() > 0.15 ? 'PRESENTE' : 'AUSENTE' },
       })
@@ -300,7 +298,7 @@ async function main() {
   console.log('✓ Asistencia T1')
 
   // ══════════════════════════════════════
-  // CALIFICACIONES T1 (cerrado)
+  // CALIFICACIONES T1
   // ══════════════════════════════════════
   const notas: Record<number, Record<string, number>> = {
     [insc1.id]: { mat: 78, len: 82, cna: 75, cso: 80, ing: 70, efi: 90 },
@@ -313,21 +311,20 @@ async function main() {
     { d: dmc5, k: 'cna' }, { d: dmc6, k: 'cso' },
     { d: dmc3, k: 'ing' }, { d: dmc4, k: 'efi' },
   ]
-
-  const calificacionesCreadas: Array<{ id: number; inscripcionId: number; nota: number; dmcId: number }> = []
+  const calificacionesCreadas: Array<{ id: number; inscripcionId: number; dmcId: number }> = []
 
   for (const insc of inscC1A) {
     for (const { d, k } of dmcMap) {
       const nota = notas[insc.id][k]
       const cal = await prisma.calificacion.upsert({
-        where: { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trim1.id } },
+        where:  { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trim1.id } },
         update: {},
         create: { inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trim1.id, nota, promedioTrimestral: nota },
       })
-      calificacionesCreadas.push({ id: cal.id, inscripcionId: insc.id, nota, dmcId: d.id })
+      calificacionesCreadas.push({ id: cal.id, inscripcionId: insc.id, dmcId: d.id })
 
       await prisma.promedioFinal.upsert({
-        where: { inscripcionId_docenteMateriaCursoId: { inscripcionId: insc.id, docenteMateriaCursoId: d.id } },
+        where:  { inscripcionId_docenteMateriaCursoId: { inscripcionId: insc.id, docenteMateriaCursoId: d.id } },
         update: {},
         create: { inscripcionId: insc.id, docenteMateriaCursoId: d.id, promedioFinal: nota, aprobado: nota >= 51 },
       })
@@ -337,51 +334,24 @@ async function main() {
 
   // ══════════════════════════════════════
   // HISTORIAL DE CALIFICACIONES
-  // ¿Por qué? Para probar que el sistema registra
-  // los cambios de notas con trazabilidad completa
-  // Simula que el docente Mamani corrigió 2 notas
   // ══════════════════════════════════════
-  const calMATPedro = calificacionesCreadas.find(
-    c => c.inscripcionId === insc2.id && c.dmcId === dmc1.id
-  )
-  const calMATMiguel = calificacionesCreadas.find(
-    c => c.inscripcionId === insc4.id && c.dmcId === dmc1.id
-  )
+  const calMATPedro  = calificacionesCreadas.find(c => c.inscripcionId === insc2.id && c.dmcId === dmc1.id)
+  const calMATMiguel = calificacionesCreadas.find(c => c.inscripcionId === insc4.id && c.dmcId === dmc1.id)
 
   if (calMATPedro) {
     await prisma.historialCalificacion.create({
-      data: {
-        notaAnterior:   55,    // nota original antes de la corrección
-        notaNueva:      65,    // nota actual en la BD
-        motivo:         'Error de transcripción — revisado con examen físico',
-        usuarioId:      uDoc1.id,  // doc_mamani hizo el cambio
-        calificacionId: calMATPedro.id,
-      },
+      data: { notaAnterior: 55, notaNueva: 65, motivo: 'Error de transcripción — revisado con examen físico', usuarioId: uDoc1.id, calificacionId: calMATPedro.id },
     })
   }
-
   if (calMATMiguel) {
-    // Miguel tuvo dos cambios de nota
     await prisma.historialCalificacion.create({
-      data: {
-        notaAnterior:   35,
-        notaNueva:      40,
-        motivo:         'Revisión de prueba de recuperación',
-        usuarioId:      uDoc1.id,
-        calificacionId: calMATMiguel.id,
-      },
+      data: { notaAnterior: 35, notaNueva: 40, motivo: 'Revisión de prueba de recuperación', usuarioId: uDoc1.id, calificacionId: calMATMiguel.id },
     })
     await prisma.historialCalificacion.create({
-      data: {
-        notaAnterior:   40,
-        notaNueva:      45,   // nota actual
-        motivo:         'Segunda revisión autorizada por director',
-        usuarioId:      uDir.id,  // el director también intervino
-        calificacionId: calMATMiguel.id,
-      },
+      data: { notaAnterior: 40, notaNueva: 45, motivo: 'Segunda revisión autorizada por director', usuarioId: uDir.id, calificacionId: calMATMiguel.id },
     })
   }
-  console.log('✓ Historial de calificaciones (Pedro: 1 cambio, Miguel: 2 cambios)')
+  console.log('✓ Historial de calificaciones')
 
   // ══════════════════════════════════════
   // RESÚMENES DE ASISTENCIA T1
@@ -398,7 +368,7 @@ async function main() {
   ]
   for (const r of resumenes) {
     await prisma.resumenAsistencia.upsert({
-      where: { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId: r.inscripcionId, docenteMateriaCursoId: r.docenteMateriaCursoId, trimestreId: r.trimestreId } },
+      where:  { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId: r.inscripcionId, docenteMateriaCursoId: r.docenteMateriaCursoId, trimestreId: r.trimestreId } },
       update: {},
       create: r,
     })
@@ -408,16 +378,14 @@ async function main() {
   // ══════════════════════════════════════
   // CONCEPTOS DE PAGO Y PAGOS
   // ══════════════════════════════════════
-  const cp1 = await prisma.conceptoPago.create({ data: { nombre: 'Matrícula 2025',              descripcion: 'Pago de matrícula gestión 2025.',             monto: 150, obligatorio: true,  gestionId: gestion.id } }).catch(async () => (await prisma.conceptoPago.findFirst({ where: { nombre: 'Matrícula 2025',              gestionId: gestion.id } }))!)
-  const cp2 = await prisma.conceptoPago.create({ data: { nombre: 'Material Didáctico',           descripcion: 'Contribución para material y fotocopias.',    monto:  80, obligatorio: true,  gestionId: gestion.id } }).catch(async () => (await prisma.conceptoPago.findFirst({ where: { nombre: 'Material Didáctico',           gestionId: gestion.id } }))!)
-  const cp3 = await prisma.conceptoPago.create({ data: { nombre: 'Mantenimiento Infraestructura', descripcion: 'Contribución voluntaria de mantenimiento.',  monto:  50, obligatorio: false, gestionId: gestion.id } }).catch(async () => (await prisma.conceptoPago.findFirst({ where: { nombre: 'Mantenimiento Infraestructura', gestionId: gestion.id } }))!)
+  const cp1 = await prisma.conceptoPago.create({ data: { nombre: 'Matrícula 2025',              descripcion: 'Pago de matrícula gestión 2025.',           monto: 150, obligatorio: true,  gestionId: gestion.id } }).catch(async () => (await prisma.conceptoPago.findFirst({ where: { nombre: 'Matrícula 2025', gestionId: gestion.id } }))!)
+  const cp2 = await prisma.conceptoPago.create({ data: { nombre: 'Material Didáctico',          descripcion: 'Contribución para material y fotocopias.',  monto:  80, obligatorio: true,  gestionId: gestion.id } }).catch(async () => (await prisma.conceptoPago.findFirst({ where: { nombre: 'Material Didáctico', gestionId: gestion.id } }))!)
+  const cp3 = await prisma.conceptoPago.create({ data: { nombre: 'Mantenimiento Infraestructura', descripcion: 'Contribución voluntaria de mantenimiento.', monto:  50, obligatorio: false, gestionId: gestion.id } }).catch(async () => (await prisma.conceptoPago.findFirst({ where: { nombre: 'Mantenimiento Infraestructura', gestionId: gestion.id } }))!)
 
   const pago = async (inscripcionId: number, conceptoPagoId: number, monto: number, metodo: 'EFECTIVO'|'TRANSFERENCIA'|'QR', recibo: string, estado: 'PAGADO'|'ANULADO' = 'PAGADO') => {
-    try {
-      return await prisma.pago.create({ data: { inscripcionId, conceptoPagoId, montoPagado: monto, metodoPago: metodo, estado, numeroRecibo: recibo, registradoPorId: uSec.id } })
-    } catch { return null }
+    try { return await prisma.pago.create({ data: { inscripcionId, conceptoPagoId, montoPagado: monto, metodoPago: metodo, estado, numeroRecibo: recibo, registradoPorId: uSec.id } }) }
+    catch { return null }
   }
-
   await pago(insc1.id, cp1.id, 150, 'EFECTIVO',      'REC-2025-0001')
   await pago(insc1.id, cp2.id,  80, 'EFECTIVO',      'REC-2025-0002')
   await pago(insc1.id, cp3.id,  50, 'QR',            'REC-2025-0003')
@@ -432,16 +400,15 @@ async function main() {
   // ACTIVIDADES
   // ══════════════════════════════════════
   const acts = [
-    { fecha: '2025-02-03', tema: 'Números enteros',   descripcion: 'Introducción a operaciones básicas.',   tarea: 'Ejercicios pág. 15-16'     },
-    { fecha: '2025-02-05', tema: 'Fracciones',        descripcion: 'Operaciones con fracciones propias.',   tarea: 'Taller de fracciones'       },
-    { fecha: '2025-02-10', tema: 'Decimales',         descripcion: 'Representación y operaciones.',         tarea: 'Ejercicios pág. 22-23'     },
-    { fecha: '2025-02-17', tema: 'Porcentajes',       descripcion: 'Cálculo en problemas cotidianos.',      tarea: '10 problemas de aplicación' },
+    { fecha: '2025-02-03', tema: 'Números enteros',     descripcion: 'Introducción a operaciones básicas.', tarea: 'Ejercicios pág. 15-16'     },
+    { fecha: '2025-02-05', tema: 'Fracciones',          descripcion: 'Operaciones con fracciones propias.', tarea: 'Taller de fracciones'       },
+    { fecha: '2025-02-10', tema: 'Decimales',           descripcion: 'Representación y operaciones.',       tarea: 'Ejercicios pág. 22-23'     },
+    { fecha: '2025-02-17', tema: 'Porcentajes',         descripcion: 'Cálculo en problemas cotidianos.',    tarea: '10 problemas de aplicación' },
     { fecha: '2025-02-24', tema: 'Álgebra — variables', descripcion: 'Concepto de variable y expresiones.', tarea: 'Pág. 35 — identificar vars' },
   ]
   for (const a of acts) {
-    try {
-      await prisma.actividad.create({ data: { docenteMateriaCursoId: dmc1.id, fecha: new Date(a.fecha), tema: a.tema, descripcion: a.descripcion, tareaAsignada: a.tarea } })
-    } catch { /* ignora duplicados */ }
+    try { await prisma.actividad.create({ data: { docenteMateriaCursoId: dmc1.id, fecha: new Date(a.fecha), tema: a.tema, descripcion: a.descripcion, tareaAsignada: a.tarea } }) }
+    catch { /* ignora duplicados */ }
   }
   console.log('✓ 5 actividades')
 
@@ -449,36 +416,33 @@ async function main() {
   // RESUMEN FINAL
   // ══════════════════════════════════════
   console.log('\n════════════════════════════════════════════════════════')
-  console.log('✅ Seed FINAL completado exitosamente')
+  console.log('✅ Seed FINAL CORREGIDO completado exitosamente')
   console.log('════════════════════════════════════════════════════════')
   console.log('\nCREDENCIALES:')
-  console.log('┌──────────────┬─────────────┬─────────────┬──────────────────────────┐')
-  console.log('│ Usuario      │ Contraseña  │ Rol         │ Perfil                   │')
-  console.log('├──────────────┼─────────────┼─────────────┼──────────────────────────┤')
-  console.log('│ director     │ admin1234   │ DIRECTOR    │ Roberto Vargas Mamani    │')
-  console.log('│ secretaria   │ sec1234     │ SECRETARIA  │ Carmen Flores Quispe     │')
-  console.log('│ doc_mamani   │ doc1234     │ DOCENTE     │ Juan Mamani Condori      │')
-  console.log('│ doc_quispe   │ doc1234     │ DOCENTE     │ María Quispe Tarqui      │')
-  console.log('│ doc_flores   │ doc1234     │ DOCENTE     │ Carlos Flores Huanca     │')
-  console.log('│ doc_condori  │ doc1234     │ DOCENTE     │ Sofía Condori Mamani     │')
-  console.log('│ est_ana      │ est1234     │ ESTUDIANTE  │ Ana Condori — ACTIVA     │')
-  console.log('│ est_pedro    │ est1234     │ ESTUDIANTE  │ Pedro Huanca — ACTIVA    │')
-  console.log('│ est_lucia    │ est1234     │ ESTUDIANTE  │ Lucía Tarqui — ACTIVA    │')
-  console.log('│ est_miguel   │ est1234     │ ESTUDIANTE  │ Miguel Mamani — RETIRADA │')
-  console.log('│ est_valeria  │ est1234     │ ESTUDIANTE  │ Valeria Quispe — ACTIVA  │')
-  console.log('│ tut_rosa     │ tut1234     │ TUTOR       │ Rosa → Ana + Miguel      │')
-  console.log('│ tut_miguel   │ tut1234     │ TUTOR       │ Miguel → Pedro           │')
-  console.log('│ tut_carmen   │ tut1234     │ TUTOR       │ Carmen → Lucía + Valeria │')
-  console.log('└──────────────┴─────────────┴─────────────┴──────────────────────────┘')
+  console.log('┌──────────────┬─────────────┬─────────────┬──────────────────────────────┐')
+  console.log('│ Usuario      │ Contraseña  │ Rol         │ Perfil                       │')
+  console.log('├──────────────┼─────────────┼─────────────┼──────────────────────────────┤')
+  console.log('│ director     │ admin1234   │ DIRECTOR    │ Roberto Vargas → Gestión 2025│')
+  console.log('│ secretaria   │ sec1234     │ SECRETARIA  │ Carmen Flores Quispe         │')
+  console.log('│ doc_mamani   │ doc1234     │ DOCENTE     │ Juan Mamani — MAT 1A/1B/2A  │')
+  console.log('│ doc_quispe   │ doc1234     │ DOCENTE     │ María Quispe — LEN           │')
+  console.log('│ est_ana      │ est1234     │ ESTUDIANTE  │ Ana Condori — ACTIVA         │')
+  console.log('│ est_pedro    │ est1234     │ ESTUDIANTE  │ Pedro Huanca — asist. 60%   │')
+  console.log('│ est_miguel   │ est1234     │ ESTUDIANTE  │ Miguel Mamani — RETIRADO     │')
+  console.log('│ tut_rosa     │ tut1234     │ TUTOR       │ Rosa Condori (Ana + Miguel)  │')
+  console.log('└──────────────┴─────────────┴─────────────┴──────────────────────────────┘')
+  console.log('\nVERIFICACIÓN DE LA RELACIÓN INVERTIDA:')
+  console.log('  GET /api/gestiones/activa → debe incluir director: Roberto Vargas')
+  console.log('  GET /api/directores/1     → director sin campo gestionId')
+  console.log('  GET /api/directores/activo → debe encontrarlo vía Gestion.directorId')
   console.log('\nCASOS DE PRUEBA:')
-  console.log('  Institución  → GET /api/institucion → datos del colegio dinámicos')
-  console.log('  Pedro MAT    → asistencia 60% → alerta en dashboard')
-  console.log('  Miguel MAT   → asistencia 40% + notas < 51 → RETIRADO el 15/06')
-  console.log('  Miguel notas → 2 cambios en historial (docente + director)')
-  console.log('  Pedro notas  → 1 cambio en historial (docente)')
-  console.log('  Valeria      → sin ningún pago → estado pendiente')
-  console.log('  T1           → cerrado → editar notas retorna 403')
-  console.log('  Boletín PDF  → encabezado toma datos de tabla Institucion')
+  console.log('  Pedro     → asistencia MAT 60% → alerta en dashboard')
+  console.log('  Miguel    → RETIRADO 15/06 + 2 cambios en historial de notas')
+  console.log('  Valeria   → sin ningún pago → estado pendiente')
+  console.log('  T1        → cerrado → editar notas retorna 403')
+  console.log('  Propuesta → GET /gestiones/1/propuesta-inscripciones')
+  console.log('              Ana/Lucía → PROMOVER a Segundo Secundaria')
+  console.log('              Miguel    → NO_CONTINUA (retirado)')
 }
 
 main()

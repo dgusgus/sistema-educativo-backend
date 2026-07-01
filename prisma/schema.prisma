@@ -1,6 +1,6 @@
 // prisma/schema.prisma
 // Sistema Web U.E. "Los Ángeles de Nazaria Ignacia"
-// Versión final — incluye Institución, Auditoría, EstadoInscripcion e HistorialCalificacion
+// Versión FINAL CORREGIDA — Director↔Gestión invertido + ciclo de vida completo
 
 generator client {
   provider = "prisma-client"
@@ -23,21 +23,17 @@ enum Rol {
   TUTOR
 }
 
-// ¿Por qué dos enums para inscripción?
-// EstadoInscripcion → qué está pasando AHORA (durante el año)
-// Resultado         → cómo TERMINÓ el año
-// Son preguntas diferentes y necesitan campos separados
 enum EstadoInscripcion {
-  ACTIVA       // estudiando normalmente
-  RETIRADA     // padres lo retiraron del colegio
-  TRANSFERIDA  // se fue a otra unidad educativa
-  CONCLUIDA    // terminó el año académico
+  ACTIVA
+  RETIRADA
+  TRANSFERIDA
+  CONCLUIDA
 }
 
 enum Resultado {
-  PENDIENTE   // el año aún no terminó
-  PROMOVIDO   // aprobó y pasa al siguiente curso
-  REPROBADO   // no alcanzó el mínimo requerido
+  PENDIENTE
+  PROMOVIDO
+  REPROBADO
 }
 
 enum DiaSemana {
@@ -69,24 +65,19 @@ enum EstadoPago {
 
 // ══════════════════════════════════════
 // INSTITUCIÓN
-// ¿Por qué? Los datos del colegio no deben estar
-// hardcodeados en el código — deben venir de la BD
-// ¿Para qué? Boletines, reportes y encabezados
-// dinámicos que el Director puede actualizar
 // ══════════════════════════════════════
 
 model Institucion {
-  id        Int     @id @default(1) // solo hay UNA institución
-  nombre    String
-  direccion String?
-  telefono  String?
-  email     String?
-  rue       String? // Registro Único Educativo
-  logoUrl   String? // para el boletín PDF
-  municipio String?
+  id           Int     @id @default(1)
+  nombre       String
+  direccion    String?
+  telefono     String?
+  email        String?
+  rue          String?
+  logoUrl      String?
+  municipio    String?
   departamento String?
 
-  // Auditoría
   actualizadoEn DateTime @updatedAt
 }
 
@@ -101,30 +92,21 @@ model Usuario {
   rol           Rol
   activo        Boolean  @default(true)
 
-  // Auditoría — ¿cuándo se creó y modificó esta cuenta?
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  // Cada usuario tiene UN solo perfil según su rol
   director   Director?
   secretaria Secretaria?
   docente    Docente?
   estudiante Estudiante?
   tutor      Tutor?
 
-  // Registros relacionados
-  pagosRegistrados     Pago[]
-  cambiosCalificacion  HistorialCalificacion[]
+  pagosRegistrados    Pago[]
+  cambiosCalificacion HistorialCalificacion[]
 }
 
 // ══════════════════════════════════════
-// PERFILES — uno por cada rol
-// ¿Por qué tablas separadas?
-// Cada rol tiene datos específicos distintos:
-//   Director   → gestionId (a cargo de qué año)
-//   Docente    → especialidad
-//   Estudiante → fechaNacimiento, dirección
-//   Tutor      → parentesco
+// PERFILES
 // ══════════════════════════════════════
 
 model Director {
@@ -136,16 +118,18 @@ model Director {
   email    String?
   activo   Boolean @default(true)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   usuarioId Int     @unique
   usuario   Usuario @relation(fields: [usuarioId], references: [id])
 
-  // @unique porque solo UN director puede estar a cargo de una gestión
-  gestionId Int?    @unique
-  gestion   Gestion? @relation(fields: [gestionId], references: [id])
+  // ¿Por qué relación inversa sin @unique?
+  // Un director puede haber estado a cargo de VARIAS gestiones
+  // a lo largo de los años (ej: dirigió en 2020 y volvió en 2025)
+  // La pregunta "¿quién dirige ESTA gestión?" se responde
+  // desde Gestion.directorId, no desde aquí
+  gestiones Gestion[]
 }
 
 model Secretaria {
@@ -157,7 +141,6 @@ model Secretaria {
   email    String?
   activo   Boolean @default(true)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -175,12 +158,10 @@ model Docente {
   email        String?
   activo       Boolean @default(true)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  // opcional — un docente puede existir sin cuenta aún
-  usuarioId Int?    @unique
+  usuarioId Int?     @unique
   usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 
   asignaciones DocenteMateriaCurso[]
@@ -195,12 +176,10 @@ model Estudiante {
   direccion       String?
   activo          Boolean   @default(true)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  // opcional — un estudiante puede existir sin cuenta
-  usuarioId Int?    @unique
+  usuarioId Int?     @unique
   usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 
   inscripciones Inscripcion[]
@@ -214,14 +193,12 @@ model Tutor {
   apellido   String
   telefono   String?
   email      String?
-  parentesco String? // Madre, Padre, Abuelo, Tutor legal, etc.
+  parentesco String?
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  // opcional — un tutor puede existir sin cuenta
-  usuarioId Int?    @unique
+  usuarioId Int?     @unique
   usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 
   estudiantes TutorEstudiante[]
@@ -232,7 +209,6 @@ model TutorEstudiante {
   tutorId      Int
   estudianteId Int
 
-  // Auditoría
   creadoEn DateTime @default(now())
 
   tutor      Tutor      @relation(fields: [tutorId], references: [id])
@@ -253,12 +229,17 @@ model Gestion {
   fechaInicio DateTime?
   fechaFin    DateTime?
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  // El director a cargo de este año
-  director      Director?
+  // ¿Por qué aquí y no en Director?
+  // La pregunta natural es "¿quién dirige la gestión 2025?"
+  // no "¿qué gestión tiene el director X?"
+  // Esto también permite que la gestión exista sin director asignado
+  // temporalmente (ej: mientras se nombra un nuevo director)
+  directorId Int?
+  director   Director? @relation(fields: [directorId], references: [id])
+
   cursos        Curso[]
   trimestres    Trimestre[]
   inscripciones Inscripcion[]
@@ -269,10 +250,9 @@ model Gestion {
 model Curso {
   id       Int    @id @default(autoincrement())
   nombre   String
-  nivel    String  // "Primero Secundaria"
-  paralelo String  // "A", "B", "C"
+  nivel    String
+  paralelo String
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -291,7 +271,6 @@ model Materia {
   codigo         String @unique
   horasSemanales Int    @default(4)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -300,13 +279,12 @@ model Materia {
 
 model Trimestre {
   id          Int       @id @default(autoincrement())
-  numero      Int       // 1, 2 o 3
+  numero      Int
   nombre      String
   fechaInicio DateTime?
   fechaFin    DateTime?
   cerrado     Boolean   @default(false)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -321,27 +299,18 @@ model Trimestre {
 
 // ══════════════════════════════════════
 // INSCRIPCIÓN
-// ¿Por qué dos campos de estado?
-//   estadoInscripcion → qué pasa DURANTE el año
-//   resultado         → cómo TERMINÓ el año
-// Ejemplo: un estudiante puede estar RETIRADA
-// (se fue en junio) y su resultado final
-// quedaría PENDIENTE porque nunca terminó el año
 // ══════════════════════════════════════
 
 model Inscripcion {
-  id               Int                @id @default(autoincrement())
-  fechaInscripcion DateTime           @default(now())
+  id               Int               @id @default(autoincrement())
+  fechaInscripcion DateTime          @default(now())
 
-  // Estado actual durante el año
   estadoInscripcion EstadoInscripcion @default(ACTIVA)
-  fechaRetiro       DateTime?          // si se retiró o transfirió
+  fechaRetiro       DateTime?
 
-  // Resultado al final del año
-  resultado        Resultado          @default(PENDIENTE)
-  observaciones    String?
+  resultado     Resultado @default(PENDIENTE)
+  observaciones String?
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -364,16 +333,11 @@ model Inscripcion {
 
 // ══════════════════════════════════════
 // DOCENTE — MATERIA — CURSO
-// El núcleo del sistema académico
-// "Juan Mamani da Matemáticas en 1ro Sec A en 2025"
-// Todo lo académico (asistencia, notas, actividades)
-// pasa por esta tabla
 // ══════════════════════════════════════
 
 model DocenteMateriaCurso {
   id Int @id @default(autoincrement())
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -404,11 +368,10 @@ model DocenteMateriaCurso {
 model Horario {
   id         Int       @id @default(autoincrement())
   diaSemana  DiaSemana
-  horaInicio String    // "08:00"
-  horaFin    String    // "09:00"
+  horaInicio String
+  horaFin    String
   aula       String?
 
-  // Auditoría
   creadoEn DateTime @default(now())
 
   docenteMateriaCursoId Int
@@ -427,7 +390,6 @@ model Asistencia {
   estado        EstadoAsistencia
   justificacion String?
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -448,7 +410,6 @@ model ResumenAsistencia {
   totalJustificado Int   @default(0)
   porcentaje       Float @default(0)
 
-  // Auditoría
   actualizadoEn DateTime @updatedAt
 
   inscripcionId         Int
@@ -468,10 +429,9 @@ model ResumenAsistencia {
 
 model Calificacion {
   id                 Int      @id @default(autoincrement())
-  nota               Float    // escala 1-100 conforme Ley 070
+  nota               Float
   promedioTrimestral Float?
 
-  // Auditoría
   registradoEn  DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -483,34 +443,21 @@ model Calificacion {
   docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
   trimestre           Trimestre           @relation(fields: [trimestreId], references: [id])
 
-  // Historial de cambios de esta calificación
   historial HistorialCalificacion[]
 
   @@unique([inscripcionId, docenteMateriaCursoId, trimestreId])
 }
 
-// ══════════════════════════════════════
-// HISTORIAL DE CALIFICACIONES
-// ¿Por qué? Si un docente cambia una nota de 45 a 75
-// no hay forma de saber que existió el 45.
-// ¿Para qué? El Director puede auditar todos los cambios
-// de notas — quién cambió, cuándo y de cuánto a cuánto.
-// Esto es importante para evitar irregularidades y dar
-// transparencia al proceso de evaluación.
-// ══════════════════════════════════════
-
 model HistorialCalificacion {
   id           Int      @id @default(autoincrement())
   notaAnterior Float
   notaNueva    Float
-  motivo       String?  // "Error de transcripción", "Revisión de examen", etc.
+  motivo       String?
   fecha        DateTime @default(now())
 
-  // Quién hizo el cambio
-  usuarioId      Int
-  usuario        Usuario      @relation(fields: [usuarioId], references: [id])
+  usuarioId Int
+  usuario   Usuario @relation(fields: [usuarioId], references: [id])
 
-  // Qué calificación se cambió
   calificacionId Int
   calificacion   Calificacion @relation(fields: [calificacionId], references: [id])
 }
@@ -520,7 +467,6 @@ model PromedioFinal {
   promedioFinal Float
   aprobado      Boolean @default(false)
 
-  // Auditoría
   calculadoEn   DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -544,7 +490,6 @@ model Actividad {
   descripcion   String?
   tareaAsignada String?
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -563,7 +508,6 @@ model ConceptoPago {
   monto       Float
   obligatorio Boolean @default(true)
 
-  // Auditoría
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
@@ -582,7 +526,6 @@ model Pago {
   numeroRecibo  String?    @unique
   observaciones String?
 
-  // Auditoría
   creadoEn DateTime @default(now())
 
   inscripcionId   Int
