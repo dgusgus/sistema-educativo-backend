@@ -472,13 +472,17 @@ export const createUsuarioConPerfil = async (
     }
 
     // Validaciones específicas por rol
+    // ¿Por qué buscar desde Gestion y no desde Director?
+    // Porque la FK ahora vive en Gestion.directorId — Director ya no tiene gestionId.
+    // La pregunta correcta es: "¿esta gestión ya tiene director asignado?"
     if (rol === 'DIRECTOR' && perfil.gestionId) {
-      const gestionOcupada = await prisma.director.findFirst({
-        where: { gestionId: perfil.gestionId },
+      const gestionOcupada = await prisma.gestion.findUnique({
+        where:  { id: perfil.gestionId },
+        select: { directorId: true, director: { select: { nombre: true, apellido: true } } },
       })
-      if (gestionOcupada) {
+      if (gestionOcupada?.directorId) {
         res.status(409).json({
-          error: `La gestión ya tiene asignado a ${gestionOcupada.nombre} ${gestionOcupada.apellido}`,
+          error: `La gestión ya tiene asignado a ${gestionOcupada.director?.nombre} ${gestionOcupada.director?.apellido}`,
         })
         return
       }
@@ -562,18 +566,28 @@ async function crearPerfil(
   usuarioId: number
 ) {
   switch (rol) {
-    case 'DIRECTOR':
-      return tx.director.create({
+    case 'DIRECTOR': {
+      // ¿Por qué dos pasos?
+      // Director ya no tiene gestionId — la FK vive en Gestion.directorId.
+      // Primero creamos el director, después actualizamos la gestión con su id.
+      const director = await tx.director.create({
         data: {
-          ci:        perfil.ci,
-          nombre:    perfil.nombre,
-          apellido:  perfil.apellido,
-          telefono:  perfil.telefono,
-          email:     perfil.email,
-          gestionId: perfil.gestionId ?? null,
+          ci:       perfil.ci,
+          nombre:   perfil.nombre,
+          apellido: perfil.apellido,
+          telefono: perfil.telefono,
+          email:    perfil.email,
           usuarioId,
         },
       })
+      if (perfil.gestionId) {
+        await tx.gestion.update({
+          where: { id: perfil.gestionId },
+          data:  { directorId: director.id },
+        })
+      }
+      return director
+    }
 
     case 'SECRETARIA':
       return tx.secretaria.create({

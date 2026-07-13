@@ -7,8 +7,8 @@ export const getDirectores = async (_req: Request, res: Response): Promise<void>
   try {
     const directores = await prisma.director.findMany({
       include: {
-        usuario: { select: { id: true, username: true, activo: true } },
-        gestion: { select: { id: true, anio: true, activa: true } },
+        usuario:   { select: { id: true, username: true, activo: true } },
+        gestiones: { select: { id: true, anio: true, activa: true } },  // ✅ plural
       },
       orderBy: { apellido: 'asc' },
     })
@@ -24,10 +24,16 @@ export const getDirectores = async (_req: Request, res: Response): Promise<void>
 export const getDirectorActivo = async (_req: Request, res: Response): Promise<void> => {
   try {
     const director = await prisma.director.findFirst({
-      where: { gestion: { activa: true }, activo: true },
+      where: {
+        activo:    true,
+        gestiones: { some: { activa: true } },  // ✅ filtrar por gestión activa
+      },
       include: {
-        usuario: { select: { id: true, username: true } },
-        gestion: { select: { id: true, anio: true } },
+        usuario:   { select: { id: true, username: true } },
+        gestiones: {
+          where:  { activa: true },             // ✅ solo traer la gestión activa
+          select: { id: true, anio: true },
+        },
       },
     })
 
@@ -50,8 +56,8 @@ export const getDirectorById = async (req: Request, res: Response): Promise<void
     const director = await prisma.director.findUnique({
       where: { id },
       include: {
-        usuario: { select: { id: true, username: true, activo: true } },
-        gestion: { select: { id: true, anio: true, activa: true } },
+        usuario:   { select: { id: true, username: true, activo: true } },
+        gestiones: { select: { id: true, anio: true, activa: true } },  // ✅ plural
       },
     })
 
@@ -95,7 +101,6 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
   }
 
   try {
-    // Verificar duplicados
     const ciExiste   = await prisma.director.findUnique({ where: { ci } })
     const userExiste = await prisma.usuario.findUnique({ where: { username } })
 
@@ -108,20 +113,20 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
       return
     }
 
-    // Si se especifica gestionId, verificar que no tenga otro director ya asignado
+    // Si se especifica gestionId, verificar que esa gestión no tenga director ya
     if (gestionId) {
-      const gestionConDirector = await prisma.director.findFirst({
-        where: { gestionId },
+      const gestionConDirector = await prisma.gestion.findUnique({
+        where:  { id: gestionId },
+        select: { directorId: true, director: { select: { nombre: true, apellido: true } } },
       })
-      if (gestionConDirector) {
+      if (gestionConDirector?.directorId) {
         res.status(409).json({
-          error: `La gestión ya tiene un director asignado: ${gestionConDirector.nombre} ${gestionConDirector.apellido}`,
+          error: `La gestión ya tiene un director asignado: ${gestionConDirector.director?.nombre} ${gestionConDirector.director?.apellido}`,
         })
         return
       }
     }
 
-    // Crear usuario + director en una sola transacción
     const resultado = await prisma.$transaction(async tx => {
       const usuario = await tx.usuario.create({
         data: {
@@ -133,12 +138,19 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
       })
 
       const director = await tx.director.create({
-        data: { ci, nombre, apellido, telefono, email, gestionId, usuarioId: usuario.id },
+        data: { ci, nombre, apellido, telefono, email, usuarioId: usuario.id },
         include: {
           usuario: { select: { id: true, username: true, rol: true } },
-          gestion: { select: { id: true, anio: true } },
         },
       })
+
+      // Si se especificó gestionId, asignar el director a esa gestión
+      if (gestionId) {
+        await tx.gestion.update({
+          where: { id: gestionId },
+          data:  { directorId: director.id },
+        })
+      }
 
       return { director, usuario }
     })
@@ -160,13 +172,12 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
 // ─── PUT /api/directores/:id ──────────────────────────────────────────────────
 export const updateDirector = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, apellido, telefono, email, activo, gestionId } = req.body as {
+  const { nombre, apellido, telefono, email, activo } = req.body as {
     nombre?: string
     apellido?: string
     telefono?: string
     email?: string
     activo?: boolean
-    gestionId?: number
   }
 
   try {
@@ -176,31 +187,17 @@ export const updateDirector = async (req: Request, res: Response): Promise<void>
       return
     }
 
-    // Si se quiere cambiar la gestión, verificar que no tenga otro director
-    if (gestionId && gestionId !== existe.gestionId) {
-      const ocupada = await prisma.director.findFirst({
-        where: { gestionId, id: { not: id } },
-      })
-      if (ocupada) {
-        res.status(409).json({
-          error: `La gestión ya tiene asignado a ${ocupada.nombre} ${ocupada.apellido}`,
-        })
-        return
-      }
-    }
-
     const director = await prisma.director.update({
       where: { id },
       data: {
-        ...(nombre    !== undefined && { nombre }),
-        ...(apellido  !== undefined && { apellido }),
-        ...(telefono  !== undefined && { telefono }),
-        ...(email     !== undefined && { email }),
-        ...(activo    !== undefined && { activo }),
-        ...(gestionId !== undefined && { gestionId }),
+        ...(nombre   !== undefined && { nombre }),
+        ...(apellido !== undefined && { apellido }),
+        ...(telefono !== undefined && { telefono }),
+        ...(email    !== undefined && { email }),
+        ...(activo   !== undefined && { activo }),
       },
       include: {
-        gestion: { select: { id: true, anio: true } },
+        gestiones: { select: { id: true, anio: true, activa: true } },  // ✅ plural
       },
     })
 
@@ -239,7 +236,6 @@ export const asignarCuentaDirector = async (req: Request, res: Response): Promis
     let idUsuarioFinal: number
 
     if (usuarioId) {
-      // Vincular a usuario existente
       const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } })
       if (!usuario) {
         res.status(404).json({ error: 'Usuario no encontrado' })
@@ -259,7 +255,6 @@ export const asignarCuentaDirector = async (req: Request, res: Response): Promis
       idUsuarioFinal = usuarioId
 
     } else if (username && password) {
-      // Crear usuario nuevo
       if (password.length < 6) {
         res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' })
         return
