@@ -2,10 +2,45 @@ import { Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import { prisma } from '../lib/prisma.js'
 import { Rol } from '../../prisma/generated/prisma/enums.js'
+import {
+  crearPersona,
+  buscarPersonaPorCi,
+  crearPerfilesParaRoles,
+  aplanarPersona,
+  validarPersona,
+  ROLES_VALIDOS,
+  type DatosPorRol,
+  type PersonaInput,
+} from '../lib/persona.helper.js'
+
+// Select reutilizable: los 5 perfiles posibles con su Persona
+const perfilesSelect = {
+  director:   { select: { id: true, activo: true, persona: { select: { id: true, nombre: true, apellido: true, ci: true } } } },
+  secretaria: { select: { id: true, activo: true, persona: { select: { id: true, nombre: true, apellido: true, ci: true } } } },
+  docente:    { select: { id: true, activo: true, especialidad: true, persona: { select: { id: true, nombre: true, apellido: true, ci: true } } } },
+  estudiante: { select: { id: true, activo: true, persona: { select: { id: true, nombre: true, apellido: true, ci: true } } } },
+  tutor:      { select: { id: true, activo: true, persona: { select: { id: true, nombre: true, apellido: true, ci: true } } } },
+} as const
+
+// Aplana y arma { perfiles: {...}, perfil: <el primero que exista> }
+// perfil (singular) queda por compatibilidad con el frontend viejo,
+// que asumía un solo rol por usuario.
+function armarPerfiles(u: {
+  director: any; secretaria: any; docente: any; estudiante: any; tutor: any
+}) {
+  const perfiles = {
+    director:   u.director   ? aplanarPersona(u.director)   : null,
+    secretaria: u.secretaria ? aplanarPersona(u.secretaria) : null,
+    docente:    u.docente    ? aplanarPersona(u.docente)    : null,
+    estudiante: u.estudiante ? aplanarPersona(u.estudiante) : null,
+    tutor:      u.tutor      ? aplanarPersona(u.tutor)      : null,
+  }
+  const perfil = perfiles.director ?? perfiles.secretaria ?? perfiles.docente
+    ?? perfiles.estudiante ?? perfiles.tutor ?? null
+  return { perfil, perfiles }
+}
 
 // ─── GET /api/usuarios ────────────────────────────────────────────────────────
-// ¿Por qué? El Director necesita ver quién tiene acceso al sistema,
-// qué roles tienen asignados y si están activos o no.
 export const getUsuarios = async (req: Request, res: Response): Promise<void> => {
   const { rol, activo, search } = req.query as {
     rol?:    string
@@ -16,30 +51,25 @@ export const getUsuarios = async (req: Request, res: Response): Promise<void> =>
   try {
     const usuarios = await prisma.usuario.findMany({
       where: {
-        ...(rol    && { rol: rol as Rol }),
+        ...(rol    && { roles: { has: rol as Rol } }),   // antes: { rol: rol as Rol }
         ...(activo !== undefined && { activo: activo === 'true' }),
         ...(search && { username: { contains: search, mode: 'insensitive' } }),
       },
       select: {
-        id:           true,
-        username:     true,
-        rol:          true,
-        activo:       true,
-        creadoEn:     true,
+        id:            true,
+        username:      true,
+        roles:         true,
+        activo:        true,
+        creadoEn:      true,
         actualizadoEn: true,
-        // Incluir el perfil vinculado según el rol
-        docente:    { select: { id: true, nombre: true, apellido: true, ci: true } },
-        estudiante: { select: { id: true, nombre: true, apellido: true, ci: true } },
-        tutor:      { select: { id: true, nombre: true, apellido: true, ci: true } },
-        // NUNCA retornar passwordHash
+        ...perfilesSelect,
       },
-      orderBy: [{ rol: 'asc' }, { username: 'asc' }],
+      orderBy: [{ username: 'asc' }],
     })
 
-    // Agregar campo "perfil" para simplificar el consumo en el frontend
     const resultado = usuarios.map(u => ({
       ...u,
-      perfil: u.docente ?? u.estudiante ?? u.tutor ?? null,
+      ...armarPerfiles(u),
     }))
 
     res.status(200).json(resultado)
@@ -50,13 +80,10 @@ export const getUsuarios = async (req: Request, res: Response): Promise<void> =>
 }
 
 // ─── GET /api/usuarios/:id ────────────────────────────────────────────────────
-// ¿Por qué? Para ver el detalle de un usuario específico y su perfil vinculado.
-// Un usuario puede ver su propio perfil; el Director puede ver cualquiera.
 export const getUsuarioById = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
 
-  // Un usuario puede ver su propio perfil
-  if (req.user?.id !== id && req.user?.rol !== 'DIRECTOR') {
+  if (req.user?.id !== id && !req.user?.roles.includes('DIRECTOR')) {
     res.status(403).json({ error: 'Solo puedes ver tu propio perfil' })
     return
   }
@@ -67,13 +94,11 @@ export const getUsuarioById = async (req: Request, res: Response): Promise<void>
       select: {
         id:            true,
         username:      true,
-        rol:           true,
+        roles:         true,
         activo:        true,
         creadoEn:      true,
         actualizadoEn: true,
-        docente:    { select: { id: true, nombre: true, apellido: true, ci: true, especialidad: true } },
-        estudiante: { select: { id: true, nombre: true, apellido: true, ci: true } },
-        tutor:      { select: { id: true, nombre: true, apellido: true, ci: true, parentesco: true } },
+        ...perfilesSelect,
       },
     })
 
@@ -82,10 +107,7 @@ export const getUsuarioById = async (req: Request, res: Response): Promise<void>
       return
     }
 
-    res.status(200).json({
-      ...usuario,
-      perfil: usuario.docente ?? usuario.estudiante ?? usuario.tutor ?? null,
-    })
+    res.status(200).json({ ...usuario, ...armarPerfiles(usuario) })
   } catch (error) {
     console.error('[usuario.getUsuarioById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -93,35 +115,30 @@ export const getUsuarioById = async (req: Request, res: Response): Promise<void>
 }
 
 // ─── POST /api/usuarios ───────────────────────────────────────────────────────
-// ¿Por qué? El Director crea cuentas para el personal (Secretaria, Docentes).
-// La Secretaria crea cuentas para Estudiantes y Tutores.
-// Roles que puede crear cada uno:
-//   Director    → cualquier rol
-//   Secretaria  → solo ESTUDIANTE y TUTOR
+// Crea SOLO la cuenta de acceso (sin perfil/Persona). Útil para vincular
+// después con /usuarios/:id/vincular a un perfil ya existente.
+// Roles que puede asignar cada uno:
+//   Director    → cualquier combinación
+//   Secretaria  → solo ESTUDIANTE y/o TUTOR
 export const createUsuario = async (req: Request, res: Response): Promise<void> => {
-  const { username, password, rol } = req.body as {
+  const { username, password, roles } = req.body as {
     username?: string
     password?: string
-    rol?: Rol
+    roles?: Rol[]
   }
 
-  if (!username || !password || !rol) {
-    res.status(400).json({ error: 'username, password y rol son obligatorios' })
+  if (!username || !password || !roles || roles.length === 0) {
+    res.status(400).json({ error: 'username, password y roles (arreglo no vacío) son obligatorios' })
     return
   }
 
-  // Validar que el rol sea válido
-  const rolesValidos: Rol[] = ['DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR']
-  if (!rolesValidos.includes(rol)) {
-    res.status(400).json({
-      error: `Rol inválido. Opciones: ${rolesValidos.join(', ')}`,
-    })
+  if (!roles.every(r => ROLES_VALIDOS.includes(r))) {
+    res.status(400).json({ error: `Roles inválidos. Opciones: ${ROLES_VALIDOS.join(', ')}` })
     return
   }
 
-  // Secretaria solo puede crear ESTUDIANTE y TUTOR
-  if (req.user?.rol === 'SECRETARIA') {
-    if (!['ESTUDIANTE', 'TUTOR'].includes(rol)) {
+  if (req.user?.roles.includes('SECRETARIA') && !req.user.roles.includes('DIRECTOR')) {
+    if (!roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))) {
       res.status(403).json({
         error: 'La Secretaria solo puede crear cuentas con rol ESTUDIANTE o TUTOR',
       })
@@ -129,14 +146,12 @@ export const createUsuario = async (req: Request, res: Response): Promise<void> 
     }
   }
 
-  // Validar longitud mínima de contraseña
   if (password.length < 6) {
     res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' })
     return
   }
 
   try {
-    // Verificar username único
     const existe = await prisma.usuario.findUnique({ where: { username } })
     if (existe) {
       res.status(409).json({ error: `El nombre de usuario "${username}" ya está en uso` })
@@ -146,10 +161,8 @@ export const createUsuario = async (req: Request, res: Response): Promise<void> 
     const passwordHash = await bcrypt.hash(password, 12)
 
     const usuario = await prisma.usuario.create({
-      data: { username, passwordHash, rol, activo: true },
-      select: {
-        id: true, username: true, rol: true, activo: true, creadoEn: true,
-      },
+      data: { username, passwordHash, roles, activo: true },
+      select: { id: true, username: true, roles: true, activo: true, creadoEn: true },
     })
 
     res.status(201).json({
@@ -163,19 +176,24 @@ export const createUsuario = async (req: Request, res: Response): Promise<void> 
 }
 
 // ─── PUT /api/usuarios/:id ────────────────────────────────────────────────────
-// ¿Por qué? Permite cambiar el rol o activar/desactivar un usuario.
-// NO permite cambiar username ni password aquí — eso tiene sus propios endpoints.
-// ¿Para qué? Si un docente también asume funciones administrativas, el Director
-// puede cambiarle el rol sin crear una cuenta nueva.
+// Cambia los roles o el estado activo de la cuenta.
+// OJO: agregar un rol acá NO crea el perfil correspondiente (Docente,
+// Estudiante, etc.) — eso se hace con /usuarios/:id/vincular o creando
+// el perfil directamente. Este endpoint solo toca la tabla Usuario.
 export const updateUsuario = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { rol, activo } = req.body as {
-    rol?:    Rol
+  const { roles, activo } = req.body as {
+    roles?:  Rol[]
     activo?: boolean
   }
 
-  if (rol === undefined && activo === undefined) {
-    res.status(400).json({ error: 'Debes enviar al menos "rol" o "activo"' })
+  if (roles === undefined && activo === undefined) {
+    res.status(400).json({ error: 'Debes enviar al menos "roles" o "activo"' })
+    return
+  }
+
+  if (roles && (roles.length === 0 || !roles.every(r => ROLES_VALIDOS.includes(r)))) {
+    res.status(400).json({ error: `roles debe ser un arreglo no vacío. Opciones: ${ROLES_VALIDOS.join(', ')}` })
     return
   }
 
@@ -186,7 +204,6 @@ export const updateUsuario = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // No puede editarse a sí mismo (para evitar que el Director se bloquee)
     if (req.user?.id === id) {
       res.status(400).json({
         error: 'No puedes modificar tu propia cuenta desde este endpoint. Usa /auth/password para cambiar tu contraseña.',
@@ -195,13 +212,15 @@ export const updateUsuario = async (req: Request, res: Response): Promise<void> 
     }
 
     // No puede existir el sistema sin al menos un Director activo
-    if (usuario.rol === 'DIRECTOR' && activo === false) {
+    const perdeRolDirector = usuario.roles.includes('DIRECTOR') && roles && !roles.includes('DIRECTOR')
+    const seDesactiva      = activo === false && usuario.roles.includes('DIRECTOR')
+    if (perdeRolDirector || seDesactiva) {
       const directoresActivos = await prisma.usuario.count({
-        where: { rol: 'DIRECTOR', activo: true },
+        where: { roles: { has: 'DIRECTOR' }, activo: true },
       })
       if (directoresActivos <= 1) {
         res.status(400).json({
-          error: 'No se puede desactivar el único Director activo del sistema',
+          error: 'No se puede quitar el rol DIRECTOR ni desactivar al único Director activo del sistema',
         })
         return
       }
@@ -210,10 +229,10 @@ export const updateUsuario = async (req: Request, res: Response): Promise<void> 
     const actualizado = await prisma.usuario.update({
       where: { id },
       data: {
-        ...(rol    !== undefined && { rol }),
+        ...(roles  !== undefined && { roles }),
         ...(activo !== undefined && { activo }),
       },
-      select: { id: true, username: true, rol: true, activo: true, actualizadoEn: true },
+      select: { id: true, username: true, roles: true, activo: true, actualizadoEn: true },
     })
 
     res.status(200).json(actualizado)
@@ -224,11 +243,6 @@ export const updateUsuario = async (req: Request, res: Response): Promise<void> 
 }
 
 // ─── PUT /api/usuarios/:id/resetear ──────────────────────────────────────────
-// ¿Por qué? Cuando un estudiante o tutor olvida su contraseña, necesita
-// que alguien se la resetee SIN conocer la contraseña anterior.
-// Es diferente a PUT /auth/password que requiere la contraseña actual.
-// ¿Para qué? La Secretaria puede dar una contraseña temporal al tutor/estudiante
-// para que pueda entrar y cambiarla desde su perfil.
 export const resetearPassword = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { nuevaPassword } = req.body as { nuevaPassword?: string }
@@ -245,9 +259,9 @@ export const resetearPassword = async (req: Request, res: Response): Promise<voi
       return
     }
 
-    // Secretaria solo puede resetear contraseñas de ESTUDIANTE y TUTOR
-    if (req.user?.rol === 'SECRETARIA') {
-      if (!['ESTUDIANTE', 'TUTOR'].includes(usuario.rol)) {
+    if (req.user?.roles.includes('SECRETARIA') && !req.user.roles.includes('DIRECTOR')) {
+      const soloEstudianteOTutor = usuario.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))
+      if (!soloEstudianteOTutor) {
         res.status(403).json({
           error: 'La Secretaria solo puede resetear contraseñas de estudiantes y tutores',
         })
@@ -255,7 +269,6 @@ export const resetearPassword = async (req: Request, res: Response): Promise<voi
       }
     }
 
-    // No puede resetearse a sí mismo desde aquí
     if (req.user?.id === id) {
       res.status(400).json({
         error: 'Para cambiar tu propia contraseña usa PUT /api/auth/password',
@@ -280,11 +293,8 @@ export const resetearPassword = async (req: Request, res: Response): Promise<voi
 }
 
 // ─── DELETE /api/usuarios/:id ─────────────────────────────────────────────────
-// ¿Por qué? Cuando una persona ya no pertenece a la institución, su cuenta
-// debe eliminarse para que no ocupe espacio ni sea un riesgo de seguridad.
-// ¿Para qué? El Director puede eliminar cuentas de personas que ya se fueron.
-// IMPORTANTE: No elimina al docente/estudiante/tutor — solo la cuenta de acceso.
-// Los datos académicos se preservan para el historial.
+// Elimina la CUENTA, no el perfil ni la Persona — los datos académicos
+// se conservan para el historial.
 export const deleteUsuario = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
 
@@ -295,16 +305,14 @@ export const deleteUsuario = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // No puede eliminarse a sí mismo
     if (req.user?.id === id) {
       res.status(400).json({ error: 'No puedes eliminar tu propia cuenta' })
       return
     }
 
-    // Proteger el último Director activo
-    if (usuario.rol === 'DIRECTOR') {
+    if (usuario.roles.includes('DIRECTOR')) {
       const directoresActivos = await prisma.usuario.count({
-        where: { rol: 'DIRECTOR', activo: true },
+        where: { roles: { has: 'DIRECTOR' }, activo: true },
       })
       if (directoresActivos <= 1) {
         res.status(400).json({
@@ -314,26 +322,20 @@ export const deleteUsuario = async (req: Request, res: Response): Promise<void> 
       }
     }
 
-    // Desvincular el usuario de su perfil antes de eliminar
-    // (los datos de la persona se conservan para el historial)
+    // Desvincular el usuario de TODOS sus perfiles antes de eliminar
+    // (Director/Secretaria no se desvinculan porque su usuarioId no es
+    // nullable en el schema — si el usuario tiene esos roles, primero
+    // hay que reasignarles cuenta o eliminar el perfil manualmente).
     await prisma.$transaction(async tx => {
-      if (usuario.rol === 'DOCENTE') {
-        await tx.docente.updateMany({
-          where: { usuarioId: id },
-          data:  { usuarioId: null },
-        })
-      } else if (usuario.rol === 'ESTUDIANTE') {
-        await tx.estudiante.updateMany({
-          where: { usuarioId: id },
-          data:  { usuarioId: null },
-        })
-      } else if (usuario.rol === 'TUTOR') {
-        await tx.tutor.updateMany({
-          where: { usuarioId: id },
-          data:  { usuarioId: null },
-        })
+      if (usuario.roles.includes('DOCENTE')) {
+        await tx.docente.updateMany({ where: { usuarioId: id }, data: { usuarioId: null } })
       }
-
+      if (usuario.roles.includes('ESTUDIANTE')) {
+        await tx.estudiante.updateMany({ where: { usuarioId: id }, data: { usuarioId: null } })
+      }
+      if (usuario.roles.includes('TUTOR')) {
+        await tx.tutor.updateMany({ where: { usuarioId: id }, data: { usuarioId: null } })
+      }
       await tx.usuario.delete({ where: { id } })
     })
 
@@ -347,10 +349,8 @@ export const deleteUsuario = async (req: Request, res: Response): Promise<void> 
 }
 
 // ─── PUT /api/usuarios/:id/vincular ──────────────────────────────────────────
-// ¿Por qué? Cuando un docente ya existe en el sistema pero aún no tiene cuenta,
-// el Director puede crear la cuenta y vincularla al perfil existente.
-// ¿Para qué? Evita duplicar datos — el docente ya tiene CI, nombre, etc.
-// Solo necesitamos darle acceso al sistema.
+// Vincula una cuenta existente a un perfil (Docente/Estudiante/Tutor)
+// que ya existe sin cuenta. El usuario debe tener ese rol en su arreglo.
 export const vincularPerfil = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { docenteId, estudianteId, tutorId } = req.body as {
@@ -372,25 +372,15 @@ export const vincularPerfil = async (req: Request, res: Response): Promise<void>
       return
     }
 
-    // Vincular según el rol del usuario
-    if (docenteId && usuario.rol === 'DOCENTE') {
-      await prisma.docente.update({
-        where: { id: docenteId },
-        data:  { usuarioId: id },
-      })
-    } else if (estudianteId && usuario.rol === 'ESTUDIANTE') {
-      await prisma.estudiante.update({
-        where: { id: estudianteId },
-        data:  { usuarioId: id },
-      })
-    } else if (tutorId && usuario.rol === 'TUTOR') {
-      await prisma.tutor.update({
-        where: { id: tutorId },
-        data:  { usuarioId: id },
-      })
+    if (docenteId && usuario.roles.includes('DOCENTE')) {
+      await prisma.docente.update({ where: { id: docenteId }, data: { usuarioId: id } })
+    } else if (estudianteId && usuario.roles.includes('ESTUDIANTE')) {
+      await prisma.estudiante.update({ where: { id: estudianteId }, data: { usuarioId: id } })
+    } else if (tutorId && usuario.roles.includes('TUTOR')) {
+      await prisma.tutor.update({ where: { id: tutorId }, data: { usuarioId: id } })
     } else {
       res.status(400).json({
-        error: `El perfil enviado no coincide con el rol "${usuario.rol}" del usuario`,
+        error: `El perfil enviado no coincide con ninguno de los roles ("${usuario.roles.join(', ')}") del usuario`,
       })
       return
     }
@@ -402,27 +392,25 @@ export const vincularPerfil = async (req: Request, res: Response): Promise<void>
   }
 }
 
-
-
-// src/controllers/usuario.controller.ts
-// Agregar este endpoint
-
-// POST /api/usuarios/con-perfil
-export const createUsuarioConPerfil = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const { rol, username, password, perfil } = req.body as {
-    rol?: Rol
+// ─── POST /api/usuarios/con-perfil ────────────────────────────────────────────
+// Crea la cuenta + la Persona + un perfil de rol por cada rol en `roles`,
+// todos apuntando a la misma Persona (ej. alguien que es Director Y
+// Docente a la vez sigue siendo UNA sola persona con dos perfiles).
+//
+// Body:
+//   { roles, username, password, persona: {...}, datosPorRol?: {...} }
+export const createUsuarioConPerfil = async (req: Request, res: Response): Promise<void> => {
+  const { roles, username, password, persona, datosPorRol } = req.body as {
+    roles?: Rol[]
     username?: string
     password?: string
-    perfil?: Record<string, any>
+    persona?: PersonaInput
+    datosPorRol?: DatosPorRol
   }
 
-  // Validaciones básicas
-  if (!rol || !username || !password || !perfil) {
+  if (!roles || roles.length === 0 || !username || !password || !persona) {
     res.status(400).json({
-      error: 'rol, username, password y perfil son obligatorios',
+      error: 'roles (arreglo no vacío), username, password y persona son obligatorios',
     })
     return
   }
@@ -432,16 +420,13 @@ export const createUsuarioConPerfil = async (
     return
   }
 
-  // Validar que el rol sea válido
-  const rolesValidos: Rol[] = ['DIRECTOR','SECRETARIA','DOCENTE','ESTUDIANTE','TUTOR']
-  if (!rolesValidos.includes(rol)) {
-    res.status(400).json({ error: `Rol inválido. Opciones: ${rolesValidos.join(', ')}` })
+  if (!roles.every(r => ROLES_VALIDOS.includes(r))) {
+    res.status(400).json({ error: `Roles inválidos. Opciones: ${ROLES_VALIDOS.join(', ')}` })
     return
   }
 
-  // Control de acceso — quién puede crear qué rol
-  if (req.user?.rol === 'SECRETARIA') {
-    if (!['ESTUDIANTE', 'TUTOR'].includes(rol)) {
+  if (req.user?.roles.includes('SECRETARIA') && !req.user.roles.includes('DIRECTOR')) {
+    if (!roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))) {
       res.status(403).json({
         error: 'La Secretaria solo puede crear cuentas con rol ESTUDIANTE o TUTOR',
       })
@@ -449,70 +434,60 @@ export const createUsuarioConPerfil = async (
     }
   }
 
-  // Validar campos obligatorios según el rol
-  const errores = validarPerfil(rol, perfil)
-  if (errores) {
-    res.status(400).json({ error: errores })
+  const errorPersona = validarPersona(persona)
+  if (errorPersona) {
+    res.status(400).json({ error: errorPersona })
     return
   }
 
   try {
-    // Verificar username único
     const userExiste = await prisma.usuario.findUnique({ where: { username } })
     if (userExiste) {
       res.status(409).json({ error: `El username "${username}" ya está en uso` })
       return
     }
 
-    // Verificar CI único en la tabla correspondiente
-    const ciExiste = await verificarCIUnico(rol, perfil.ci)
-    if (ciExiste) {
-      res.status(409).json({ error: `Ya existe un ${rol.toLowerCase()} con el CI ${perfil.ci}` })
+    // El CI ya es único a nivel de Persona (una sola tabla)
+    const personaExiste = await buscarPersonaPorCi(persona.ci)
+    if (personaExiste) {
+      res.status(409).json({ error: `Ya existe una persona registrada con el CI ${persona.ci}` })
       return
     }
 
-    // Validaciones específicas por rol
-    // ¿Por qué buscar desde Gestion y no desde Director?
-    // Porque la FK ahora vive en Gestion.directorId — Director ya no tiene gestionId.
-    // La pregunta correcta es: "¿esta gestión ya tiene director asignado?"
-    if (rol === 'DIRECTOR' && perfil.gestionId) {
+    // ¿Por qué validar desde Gestion y no desde Director?
+    // Porque la FK vive en Gestion.directorId — Director ya no tiene gestionId.
+    if (roles.includes('DIRECTOR') && datosPorRol?.DIRECTOR?.gestionId) {
       const gestionOcupada = await prisma.gestion.findUnique({
-        where:  { id: perfil.gestionId },
-        select: { directorId: true, director: { select: { nombre: true, apellido: true } } },
+        where:  { id: datosPorRol.DIRECTOR.gestionId },
+        select: { directorId: true, director: { select: { persona: { select: { nombre: true, apellido: true } } } } },
       })
       if (gestionOcupada?.directorId) {
         res.status(409).json({
-          error: `La gestión ya tiene asignado a ${gestionOcupada.director?.nombre} ${gestionOcupada.director?.apellido}`,
+          error: `La gestión ya tiene asignado a ${gestionOcupada.director?.persona.nombre} ${gestionOcupada.director?.persona.apellido}`,
         })
         return
       }
     }
 
-    // Crear usuario + perfil en una sola transacción
     const resultado = await prisma.$transaction(async tx => {
-      // 1. Crear el usuario
       const usuario = await tx.usuario.create({
-        data: {
-          username,
-          passwordHash: await bcrypt.hash(password, 12),
-          rol,
-          activo: true,
-        },
+        data: { username, passwordHash: await bcrypt.hash(password, 12), roles, activo: true },
       })
 
-      // 2. Crear el perfil según el rol
-      const perfilCreado = await crearPerfil(tx, rol, perfil, usuario.id)
+      const personaCreada = await crearPersona(tx, persona)
+      const perfiles = await crearPerfilesParaRoles(tx, roles, personaCreada.id, usuario.id, datosPorRol)
 
-      return { usuario, perfil: perfilCreado }
+      return { usuario, persona: personaCreada, perfiles }
     })
 
     res.status(201).json({
       usuario: {
         id:       resultado.usuario.id,
         username: resultado.usuario.username,
-        rol:      resultado.usuario.rol,
+        roles:    resultado.usuario.roles,
       },
-      perfil:  resultado.perfil,
+      persona:  resultado.persona,
+      perfiles: resultado.perfiles,
       credenciales: {
         username,
         password,
@@ -522,123 +497,5 @@ export const createUsuarioConPerfil = async (
   } catch (error) {
     console.error('[usuario.createUsuarioConPerfil]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
-  }
-}
-
-// ─── Helpers internos ─────────────────────────────────────────────────────────
-
-// Valida campos obligatorios según el rol
-function validarPerfil(rol: Rol, perfil: Record<string, any>): string | null {
-  if (!perfil.ci)      return 'El campo ci es obligatorio'
-  if (!perfil.nombre)  return 'El campo nombre es obligatorio'
-  if (!perfil.apellido) return 'El campo apellido es obligatorio'
-
-  if (rol === 'DOCENTE' && !perfil.especialidad) {
-    // especialidad no es obligatorio pero lo alertamos
-  }
-
-  return null
-}
-
-// Verifica CI único en la tabla correspondiente al rol
-async function verificarCIUnico(rol: Rol, ci: string): Promise<boolean> {
-  switch (rol) {
-    case 'DIRECTOR':
-      return !!(await prisma.director.findUnique({ where: { ci } }))
-    case 'SECRETARIA':
-      return !!(await prisma.secretaria.findUnique({ where: { ci } }))
-    case 'DOCENTE':
-      return !!(await prisma.docente.findUnique({ where: { ci } }))
-    case 'ESTUDIANTE':
-      return !!(await prisma.estudiante.findUnique({ where: { ci } }))
-    case 'TUTOR':
-      return !!(await prisma.tutor.findUnique({ where: { ci } }))
-    default:
-      return false
-  }
-}
-
-// Crea el perfil en la tabla correcta según el rol
-async function crearPerfil(
-  tx: any,
-  rol: Rol,
-  perfil: Record<string, any>,
-  usuarioId: number
-) {
-  switch (rol) {
-    case 'DIRECTOR': {
-      // ¿Por qué dos pasos?
-      // Director ya no tiene gestionId — la FK vive en Gestion.directorId.
-      // Primero creamos el director, después actualizamos la gestión con su id.
-      const director = await tx.director.create({
-        data: {
-          ci:       perfil.ci,
-          nombre:   perfil.nombre,
-          apellido: perfil.apellido,
-          telefono: perfil.telefono,
-          email:    perfil.email,
-          usuarioId,
-        },
-      })
-      if (perfil.gestionId) {
-        await tx.gestion.update({
-          where: { id: perfil.gestionId },
-          data:  { directorId: director.id },
-        })
-      }
-      return director
-    }
-
-    case 'SECRETARIA':
-      return tx.secretaria.create({
-        data: {
-          ci:       perfil.ci,
-          nombre:   perfil.nombre,
-          apellido: perfil.apellido,
-          telefono: perfil.telefono,
-          email:    perfil.email,
-          usuarioId,
-        },
-      })
-
-    case 'DOCENTE':
-      return tx.docente.create({
-        data: {
-          ci:          perfil.ci,
-          nombre:      perfil.nombre,
-          apellido:    perfil.apellido,
-          especialidad: perfil.especialidad,
-          telefono:    perfil.telefono,
-          email:       perfil.email,
-          usuarioId,
-        },
-      })
-
-    case 'ESTUDIANTE':
-      return tx.estudiante.create({
-        data: {
-          ci:             perfil.ci,
-          nombre:         perfil.nombre,
-          apellido:       perfil.apellido,
-          fechaNacimiento: perfil.fechaNacimiento
-            ? new Date(perfil.fechaNacimiento)
-            : null,
-          direccion: perfil.direccion,
-          usuarioId,
-        },
-      })
-
-    case 'TUTOR':
-      return tx.tutor.create({
-        data: {
-          ci:        perfil.ci,
-          nombre:    perfil.nombre,
-          apellido:  perfil.apellido,
-          telefono:  perfil.telefono,
-          email:     perfil.email,
-          parentesco: perfil.parentesco,
-          usuarioId,
-        },
-      })
   }
 }

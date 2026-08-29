@@ -5,9 +5,9 @@ declare global {
     interface Request {
       user?: {
         id: number
-        rol: Rol
+        roles: Rol[]
         username: string
-        nombre:   string
+        nombre: string
       }
     }
   }

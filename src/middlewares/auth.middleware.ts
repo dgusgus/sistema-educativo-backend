@@ -4,7 +4,7 @@ import { Rol } from '../../prisma/generated/prisma/enums.js'
 
 interface JwtPayload {
   id: number
-  rol: Rol
+  roles: Rol[]
   username: string
   nombre: string
 }

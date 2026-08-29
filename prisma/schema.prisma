@@ -1,6 +1,11 @@
 // prisma/schema.prisma
 // Sistema Web U.E. "Los Ángeles de Nazaria Ignacia"
-// Versión FINAL CORREGIDA — Director↔Gestión invertido + ciclo de vida completo
+// Versión v6 — sobre v5: FK compuesta (cursoId, gestionId) -> Curso en
+// Inscripcion y DocenteMateriaCurso, para que Postgres garantice que
+// gestionId siempre coincide con la gestión real del curso (ya no
+// depende de que el servicio valide). Se documentan los invariantes que
+// quedan a cargo del servicio (contexto académico cruzado en Asistencia
+// y afines, y quién recalcula ResumenAsistencia/Calificacion).
 
 generator client {
   provider = "prisma-client"
@@ -30,6 +35,9 @@ enum EstadoInscripcion {
   CONCLUIDA
 }
 
+// TODO: confirmar contra el acta de centralización real del colegio si
+// dice "Reprobado" o "No promovido" — es la palabra que se imprime en el
+// boletín oficial, tiene que coincidir exacto. Sigue pendiente.
 enum Resultado {
   PENDIENTE
   PROMOVIDO
@@ -48,6 +56,7 @@ enum DiaSemana {
 enum EstadoAsistencia {
   PRESENTE
   AUSENTE
+  RETRASO
   JUSTIFICADO
 }
 
@@ -59,8 +68,64 @@ enum MetodoPago {
 
 enum EstadoPago {
   PAGADO
+  PARCIAL
   PENDIENTE
   ANULADO
+}
+
+enum Sexo {
+  MASCULINO
+  FEMENINO
+}
+
+enum Nivel {
+  PRIMARIA
+  SECUNDARIA
+}
+
+enum Turno {
+  MANANA
+  TARDE
+  NOCHE
+}
+
+enum Parentesco {
+  PADRE
+  MADRE
+  ABUELO
+  ABUELA
+  TIO
+  TIA
+  HERMANO
+  HERMANA
+  TUTOR_LEGAL
+  OTRO
+}
+
+enum Dependencia {
+  FISCAL
+  CONVENIO
+  PRIVADO
+}
+
+enum TipoValorConfig {
+  TEXTO
+  ENTERO
+  DECIMAL
+  BOOLEANO
+  JSON
+}
+
+// ══════════════════════════════════════
+// CONFIGURACIÓN DEL SISTEMA
+// ══════════════════════════════════════
+// Clave-valor para parámetros que el director puede cambiar sin redeploy.
+model Configuracion {
+  clave         String          @id
+  valor         String
+  tipo          TipoValorConfig @default(TEXTO)
+  descripcion   String?
+  actualizadoEn DateTime        @updatedAt
 }
 
 // ══════════════════════════════════════
@@ -68,7 +133,7 @@ enum EstadoPago {
 // ══════════════════════════════════════
 
 model Institucion {
-  id           Int     @id @default(1)
+  id           Int          @id @default(1)
   nombre       String
   direccion    String?
   telefono     String?
@@ -77,7 +142,9 @@ model Institucion {
   logoUrl      String?
   municipio    String?
   departamento String?
+  dependencia  Dependencia?
 
+  creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 }
 
@@ -86,11 +153,14 @@ model Institucion {
 // ══════════════════════════════════════
 
 model Usuario {
-  id            Int      @id @default(autoincrement())
-  username      String   @unique
-  passwordHash  String
-  rol           Rol
-  activo        Boolean  @default(true)
+  id               Int       @id @default(autoincrement())
+  username         String    @unique
+  passwordHash     String
+  roles            Rol[]
+  activo           Boolean   @default(true)
+  ultimoAcceso     DateTime?
+  intentosFallidos Int       @default(0)
+  bloqueadoHasta   DateTime?
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
@@ -103,6 +173,38 @@ model Usuario {
 
   pagosRegistrados    Pago[]
   cambiosCalificacion HistorialCalificacion[]
+  notasRegistradas    NotaActividad[]
+
+  @@index([activo])
+}
+
+// ══════════════════════════════════════
+// PERSONA COMPARTIDA
+// ══════════════════════════════════════
+
+model Persona {
+  id              Int       @id @default(autoincrement())
+  ci              String?   @unique
+  nombre          String
+  apellido        String
+  sexo            Sexo?
+  fechaNacimiento DateTime? @db.Date
+  direccion       String?
+  telefono        String?
+  email           String?
+  nacionalidad    String?   @default("Boliviana")
+  fotoUrl         String?
+
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  director   Director?
+  secretaria Secretaria?
+  docente    Docente?
+  estudiante Estudiante?
+  tutor      Tutor?
+
+  @@index([nombre, apellido])
 }
 
 // ══════════════════════════════════════
@@ -110,111 +212,107 @@ model Usuario {
 // ══════════════════════════════════════
 
 model Director {
-  id       Int     @id @default(autoincrement())
-  ci       String  @unique
-  nombre   String
-  apellido String
-  telefono String?
-  email    String?
-  activo   Boolean @default(true)
+  id        Int     @id @default(autoincrement())
+  personaId Int     @unique
+  activo    Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
+  persona   Persona @relation(fields: [personaId], references: [id], onDelete: Restrict)
   usuarioId Int     @unique
-  usuario   Usuario @relation(fields: [usuarioId], references: [id])
+  usuario   Usuario @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
 
-  // ¿Por qué relación inversa sin @unique?
-  // Un director puede haber estado a cargo de VARIAS gestiones
-  // a lo largo de los años (ej: dirigió en 2020 y volvió en 2025)
-  // La pregunta "¿quién dirige ESTA gestión?" se responde
-  // desde Gestion.directorId, no desde aquí
   gestiones Gestion[]
 }
 
 model Secretaria {
-  id       Int     @id @default(autoincrement())
-  ci       String  @unique
-  nombre   String
-  apellido String
-  telefono String?
-  email    String?
-  activo   Boolean @default(true)
+  id        Int     @id @default(autoincrement())
+  personaId Int     @unique
+  activo    Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
+  persona   Persona @relation(fields: [personaId], references: [id], onDelete: Restrict)
   usuarioId Int     @unique
-  usuario   Usuario @relation(fields: [usuarioId], references: [id])
+  usuario   Usuario @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
 }
 
 model Docente {
   id           Int     @id @default(autoincrement())
-  ci           String  @unique
-  nombre       String
-  apellido     String
+  personaId    Int     @unique
   especialidad String?
-  telefono     String?
-  email        String?
   activo       Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
+  persona   Persona  @relation(fields: [personaId], references: [id], onDelete: Restrict)
   usuarioId Int?     @unique
-  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
 
-  asignaciones DocenteMateriaCurso[]
+  asignaciones     DocenteMateriaCurso[]
+  cursosTutoreados Curso[]               @relation("CursoTutorDocente")
 }
 
 model Estudiante {
-  id              Int       @id @default(autoincrement())
-  ci              String    @unique
-  nombre          String
-  apellido        String
-  fechaNacimiento DateTime?
-  direccion       String?
-  activo          Boolean   @default(true)
+  id               Int     @id @default(autoincrement())
+  rude             String? @unique
+  personaId        Int     @unique
+  lugarNacimiento  String?
+  idiomaMaterno    String? @default("Castellano")
+  idiomaHablado    String? @default("Castellano")
+  discapacidad     Boolean @default(false)
+  tipoDiscapacidad String?
+  activo           Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
+  persona   Persona  @relation(fields: [personaId], references: [id], onDelete: Restrict)
   usuarioId Int?     @unique
-  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
 
   inscripciones Inscripcion[]
   tutores       TutorEstudiante[]
+
+  @@index([activo])
 }
 
 model Tutor {
-  id         Int     @id @default(autoincrement())
-  ci         String  @unique
-  nombre     String
-  apellido   String
-  telefono   String?
-  email      String?
-  parentesco String?
+  id               Int     @id @default(autoincrement())
+  personaId        Int     @unique
+  ocupacion        String?
+  gradoInstruccion String?
+  activo           Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
+  persona   Persona  @relation(fields: [personaId], references: [id], onDelete: Restrict)
   usuarioId Int?     @unique
-  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
 
   estudiantes TutorEstudiante[]
 }
 
 model TutorEstudiante {
-  id           Int @id @default(autoincrement())
-  tutorId      Int
-  estudianteId Int
+  id                Int        @id @default(autoincrement())
+  tutorId           Int
+  estudianteId      Int
+  parentesco        Parentesco
+  esTutorPrincipal  Boolean    @default(false)
+  esApoderado       Boolean    @default(false)
+  viveConEstudiante Boolean    @default(true)
 
   creadoEn DateTime @default(now())
 
-  tutor      Tutor      @relation(fields: [tutorId], references: [id])
-  estudiante Estudiante @relation(fields: [estudianteId], references: [id])
+  tutor      Tutor      @relation(fields: [tutorId], references: [id], onDelete: Cascade)
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id], onDelete: Cascade)
 
   @@unique([tutorId, estudianteId])
+  @@index([estudianteId])
 }
 
 // ══════════════════════════════════════
@@ -222,119 +320,160 @@ model TutorEstudiante {
 // ══════════════════════════════════════
 
 model Gestion {
-  id          Int       @id @default(autoincrement())
-  anio        Int       @unique
-  descripcion String?
-  activa      Boolean   @default(false)
-  fechaInicio DateTime?
-  fechaFin    DateTime?
+  id                   Int       @id @default(autoincrement())
+  anio                 Int       @unique
+  descripcion          String?
+  activa               Boolean   @default(false)
+  fechaInicio          DateTime? @db.Date
+  fechaFin             DateTime? @db.Date
+  notaMinimaAprobacion Decimal   @default(51) @db.Decimal(5, 2)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  // ¿Por qué aquí y no en Director?
-  // La pregunta natural es "¿quién dirige la gestión 2025?"
-  // no "¿qué gestión tiene el director X?"
-  // Esto también permite que la gestión exista sin director asignado
-  // temporalmente (ej: mientras se nombra un nuevo director)
   directorId Int?
-  director   Director? @relation(fields: [directorId], references: [id])
+  director   Director? @relation(fields: [directorId], references: [id], onDelete: SetNull)
 
   cursos        Curso[]
   trimestres    Trimestre[]
   inscripciones Inscripcion[]
   asignaciones  DocenteMateriaCurso[]
   conceptosPago ConceptoPago[]
+  dimensiones   DimensionEvaluacion[]
+
+  @@index([activa])
 }
 
+// `@@unique([id, gestionId])` es el ancla: le permite a Inscripcion y a
+// DocenteMateriaCurso referenciar "este curso Y esta gestión" como una
+// sola FK compuesta, así Postgres rechaza cualquier fila cuyo gestionId
+// no coincida con el del curso real.
 model Curso {
-  id       Int    @id @default(autoincrement())
-  nombre   String
-  nivel    String
-  paralelo String
+  id        Int     @id @default(autoincrement())
+  nivel     Nivel
+  grado     Int
+  paralelo  String
+  turno     Turno   @default(MANANA)
+  capacidad Int?
+  activo    Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   gestionId Int
-  gestion   Gestion @relation(fields: [gestionId], references: [id])
+  gestion   Gestion @relation(fields: [gestionId], references: [id], onDelete: Restrict)
+
+  tutorDocenteId Int?
+  tutorDocente   Docente? @relation("CursoTutorDocente", fields: [tutorDocenteId], references: [id], onDelete: SetNull)
 
   inscripciones Inscripcion[]
   asignaciones  DocenteMateriaCurso[]
 
-  @@unique([nivel, paralelo, gestionId])
+  @@unique([nivel, grado, paralelo, turno, gestionId])
+  @@unique([id, gestionId])
+  @@index([gestionId])
+  @@index([activo])
+}
+
+model CampoSaber {
+  id     Int     @id @default(autoincrement())
+  nombre String  @unique
+  orden  Int     @default(0)
+  activo Boolean @default(true)
+
+  materias Materia[]
+
+  @@index([activo])
 }
 
 model Materia {
-  id             Int    @id @default(autoincrement())
+  id             Int     @id @default(autoincrement())
   nombre         String
-  codigo         String @unique
-  horasSemanales Int    @default(4)
+  codigo         String  @unique
+  horasSemanales Int     @default(4)
+  campoSaberId   Int?
+  activo         Boolean @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
+  campoSaber   CampoSaber?           @relation(fields: [campoSaberId], references: [id], onDelete: SetNull)
   asignaciones DocenteMateriaCurso[]
+
+  @@index([campoSaberId])
+  @@index([activo])
 }
 
 model Trimestre {
-  id          Int       @id @default(autoincrement())
+  id          Int      @id @default(autoincrement())
   numero      Int
   nombre      String
-  fechaInicio DateTime?
-  fechaFin    DateTime?
-  cerrado     Boolean   @default(false)
+  fechaInicio DateTime @db.Date
+  fechaFin    DateTime @db.Date
+  cerrado     Boolean  @default(false)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   gestionId Int
-  gestion   Gestion @relation(fields: [gestionId], references: [id])
+  gestion   Gestion @relation(fields: [gestionId], references: [id], onDelete: Restrict)
 
-  calificaciones     Calificacion[]
-  resumenAsistencias ResumenAsistencia[]
+  calificaciones         Calificacion[]
+  actividadesEvaluativas ActividadEvaluativa[]
+  bitacoras              BitacoraClase[]
+  resumenAsistencias     ResumenAsistencia[]
+  asistencias            Asistencia[]
 
   @@unique([numero, gestionId])
+  @@unique([id, gestionId])
+  @@index([gestionId])
 }
 
 // ══════════════════════════════════════
 // INSCRIPCIÓN
 // ══════════════════════════════════════
-
+// `gestionId` ya NO es un dato que el servicio deba "acordarse" de
+// validar: `curso` es una FK COMPUESTA (cursoId, gestionId) -> Curso(id,
+// gestionId). Si gestionId no coincide con la gestión real del curso,
+// Postgres rechaza el INSERT/UPDATE directamente.
 model Inscripcion {
-  id               Int               @id @default(autoincrement())
-  fechaInscripcion DateTime          @default(now())
-
+  id                Int               @id @default(autoincrement())
+  fechaInscripcion  DateTime          @default(now()) @db.Date
   estadoInscripcion EstadoInscripcion @default(ACTIVA)
-  fechaRetiro       DateTime?
-
-  resultado     Resultado @default(PENDIENTE)
-  observaciones String?
+  fechaRetiro       DateTime?         @db.Date
+  resultado         Resultado         @default(PENDIENTE)
+  observaciones     String?
+  procedencia       String?
+  gestionId         Int
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   estudianteId Int
   cursoId      Int
-  gestionId    Int
 
-  estudiante Estudiante @relation(fields: [estudianteId], references: [id])
-  curso      Curso      @relation(fields: [cursoId], references: [id])
-  gestion    Gestion    @relation(fields: [gestionId], references: [id])
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id], onDelete: Restrict)
+  curso      Curso      @relation(fields: [cursoId, gestionId], references: [id, gestionId], onDelete: Restrict)
+  gestion    Gestion    @relation(fields: [gestionId], references: [id], onDelete: Restrict)
 
   asistencias        Asistencia[]
   calificaciones     Calificacion[]
+  notasActividad     NotaActividad[]
   promediosFinales   PromedioFinal[]
   resumenAsistencias ResumenAsistencia[]
   pagos              Pago[]
 
   @@unique([estudianteId, gestionId])
+  @@unique([id, gestionId]) // ancla para una futura FK compuesta desde Asistencia/Calificacion, si se decide cerrar el punto 3 a nivel de BD
+  @@index([cursoId])
+  @@index([estadoInscripcion])
 }
 
 // ══════════════════════════════════════
 // DOCENTE — MATERIA — CURSO
 // ══════════════════════════════════════
-
+// Mismo mecanismo que Inscripcion: `curso` es FK compuesta contra
+// Curso(id, gestionId) — gestionId no puede divergir del curso real.
 model DocenteMateriaCurso {
   id Int @id @default(autoincrement())
 
@@ -346,19 +485,24 @@ model DocenteMateriaCurso {
   cursoId   Int
   gestionId Int
 
-  docente Docente @relation(fields: [docenteId], references: [id])
-  materia Materia @relation(fields: [materiaId], references: [id])
-  curso   Curso   @relation(fields: [cursoId], references: [id])
-  gestion Gestion @relation(fields: [gestionId], references: [id])
+  docente Docente @relation(fields: [docenteId], references: [id], onDelete: Restrict)
+  materia Materia @relation(fields: [materiaId], references: [id], onDelete: Restrict)
+  curso   Curso   @relation(fields: [cursoId, gestionId], references: [id, gestionId], onDelete: Restrict)
+  gestion Gestion @relation(fields: [gestionId], references: [id], onDelete: Restrict)
 
-  horarios           Horario[]
-  asistencias        Asistencia[]
-  calificaciones     Calificacion[]
-  promediosFinales   PromedioFinal[]
-  resumenAsistencias ResumenAsistencia[]
-  actividades        Actividad[]
+  horarios               Horario[]
+  asistencias            Asistencia[]
+  calificaciones         Calificacion[]
+  promediosFinales       PromedioFinal[]
+  resumenAsistencias     ResumenAsistencia[]
+  bitacoras              BitacoraClase[]
+  actividadesEvaluativas ActividadEvaluativa[]
 
   @@unique([docenteId, materiaId, cursoId, gestionId])
+  @@unique([id, gestionId]) // ancla, mismo motivo que en Inscripcion
+  @@index([docenteId])
+  @@index([cursoId])
+  @@index([materiaId])
 }
 
 // ══════════════════════════════════════
@@ -368,25 +512,37 @@ model DocenteMateriaCurso {
 model Horario {
   id         Int       @id @default(autoincrement())
   diaSemana  DiaSemana
-  horaInicio String
-  horaFin    String
+  horaInicio DateTime  @db.Time
+  horaFin    DateTime  @db.Time
   aula       String?
 
   creadoEn DateTime @default(now())
 
   docenteMateriaCursoId Int
-  docenteMateriaCurso   DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+  docenteMateriaCurso   DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Cascade)
 
   @@unique([docenteMateriaCursoId, diaSemana, horaInicio])
+  @@index([docenteMateriaCursoId])
 }
 
 // ══════════════════════════════════════
 // ASISTENCIA
 // ══════════════════════════════════════
-
+// INVARIANTE DE SERVICIO (no garantizado por Postgres todavía):
+// inscripcion, docenteMateriaCurso y trimestre deben pertenecer a la
+// MISMA gestión. La FK compuesta de Curso protege Inscripcion↔Curso y
+// DMC↔Curso por separado, pero no obliga a que esos dos, más el
+// Trimestre elegido, coincidan entre sí en una misma fila de Asistencia.
+// Todo servicio que cree/edite Asistencia, Calificacion, NotaActividad,
+// PromedioFinal, ActividadEvaluativa o ResumenAsistencia DEBE pasar por
+// un único validador — p.ej. assertMismoContextoAcademico(inscripcionId,
+// docenteMateriaCursoId, trimestreId) — antes del write. Si más adelante
+// se quiere esta garantía a nivel de BD, el camino es propagar gestionId
+// + FK compuesta hacia estas tablas usando los anclas @@unique([id,
+// gestionId]) ya dejados en Curso/Inscripcion/DocenteMateriaCurso.
 model Asistencia {
   id            Int              @id @default(autoincrement())
-  fecha         DateTime
+  fecha         DateTime         @db.Date
   estado        EstadoAsistencia
   justificacion String?
 
@@ -395,97 +551,127 @@ model Asistencia {
 
   inscripcionId         Int
   docenteMateriaCursoId Int
+  trimestreId           Int
 
-  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
-  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id], onDelete: Restrict)
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Restrict)
+  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id], onDelete: Restrict)
 
   @@unique([inscripcionId, docenteMateriaCursoId, fecha])
+  @@index([fecha])
+  @@index([inscripcionId])
+  @@index([estado])
+  @@index([trimestreId])
 }
 
+// Snapshot, no fuente de verdad. ÚNICO escritor: recalcularResumenAsistencia().
+// Se dispara al crear/editar una Asistencia y al cerrar el trimestre. Una
+// vez Trimestre.cerrado = true, el valor queda congelado — así el
+// boletín ya impreso no cambia si alguien corrige una asistencia después.
 model ResumenAsistencia {
-  id               Int   @id @default(autoincrement())
-  totalClases      Int   @default(0)
-  totalPresente    Int   @default(0)
-  totalAusente     Int   @default(0)
-  totalJustificado Int   @default(0)
-  porcentaje       Float @default(0)
+  id               Int     @id @default(autoincrement())
+  totalClases      Int     @default(0)
+  totalPresente    Int     @default(0)
+  totalAusente     Int     @default(0)
+  totalRetraso     Int     @default(0)
+  totalJustificado Int     @default(0)
+  porcentaje       Decimal @default(0) @db.Decimal(5, 2)
 
+  creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   inscripcionId         Int
   docenteMateriaCursoId Int
   trimestreId           Int
 
-  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
-  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
-  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id])
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id], onDelete: Restrict)
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Restrict)
+  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id], onDelete: Restrict)
 
   @@unique([inscripcionId, docenteMateriaCursoId, trimestreId])
+  @@index([trimestreId])
 }
 
 // ══════════════════════════════════════
-// CALIFICACIONES
+// CALIFICACIONES POR DIMENSIÓN
 // ══════════════════════════════════════
+// Cadena: Gestion → DimensionEvaluacion → ActividadEvaluativa →
+// NotaActividad. NotaActividad es la ÚNICA fuente de verdad de la nota;
+// Calificacion.promedioTrimestral es un snapshot cuyo ÚNICO escritor es
+// recalcularCalificacion(). Una vez Trimestre.cerrado = true, cualquier
+// corrección pasa obligatoriamente por HistorialCalificacion — nunca un
+// UPDATE directo sobre promedioTrimestral.
 
-model Calificacion {
-  id                 Int      @id @default(autoincrement())
-  nota               Float
-  promedioTrimestral Float?
+model DimensionEvaluacion {
+  id             Int     @id @default(autoincrement())
+  gestionId      Int
+  nombre         String
+  puntajeMaximo  Decimal @db.Decimal(5, 2)
+  pesoEnPromedio Decimal @default(1) @db.Decimal(4, 3)
+  orden          Int
+  esAutoevaluada Boolean @default(false)
 
-  registradoEn  DateTime @default(now())
+  creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  inscripcionId         Int
+  gestion                 Gestion                 @relation(fields: [gestionId], references: [id], onDelete: Restrict)
+  actividadesEvaluativas  ActividadEvaluativa[]
+  calificacionesDimension CalificacionDimension[]
+
+  @@unique([gestionId, nombre])
+  @@index([gestionId])
+}
+
+model ActividadEvaluativa {
+  id              Int      @id @default(autoincrement())
+  nombre          String
+  fecha           DateTime @default(now()) @db.Date
+  puntajeMaximo   Decimal  @db.Decimal(5, 2)
+  peso            Decimal  @default(1) @db.Decimal(4, 3)
+  esRecuperatorio Boolean  @default(false)
+  activo          Boolean  @default(true)
+
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
   docenteMateriaCursoId Int
   trimestreId           Int
+  dimensionId           Int
 
-  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
-  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
-  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id])
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Restrict)
+  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id], onDelete: Restrict)
+  dimension           DimensionEvaluacion @relation(fields: [dimensionId], references: [id], onDelete: Restrict)
 
-  historial HistorialCalificacion[]
+  notas NotaActividad[]
 
-  @@unique([inscripcionId, docenteMateriaCursoId, trimestreId])
+  @@index([docenteMateriaCursoId, trimestreId])
+  @@index([dimensionId])
+  @@index([activo])
 }
 
-model HistorialCalificacion {
-  id           Int      @id @default(autoincrement())
-  notaAnterior Float
-  notaNueva    Float
-  motivo       String?
-  fecha        DateTime @default(now())
+model NotaActividad {
+  id                    Int     @id @default(autoincrement())
+  actividadEvaluativaId Int
+  inscripcionId         Int
+  nota                  Decimal @db.Decimal(5, 2)
+  observacion           String?
+  registradoPorId       Int?
 
-  usuarioId Int
-  usuario   Usuario @relation(fields: [usuarioId], references: [id])
-
-  calificacionId Int
-  calificacion   Calificacion @relation(fields: [calificacionId], references: [id])
-}
-
-model PromedioFinal {
-  id            Int     @id @default(autoincrement())
-  promedioFinal Float
-  aprobado      Boolean @default(false)
-
-  calculadoEn   DateTime @default(now())
+  creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  inscripcionId         Int
-  docenteMateriaCursoId Int
+  actividadEvaluativa ActividadEvaluativa @relation(fields: [actividadEvaluativaId], references: [id], onDelete: Restrict)
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id], onDelete: Restrict)
+  registradoPor       Usuario?            @relation(fields: [registradoPorId], references: [id], onDelete: SetNull)
 
-  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id])
-  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
-
-  @@unique([inscripcionId, docenteMateriaCursoId])
+  @@unique([actividadEvaluativaId, inscripcionId])
+  @@index([inscripcionId])
+  @@index([actividadEvaluativaId])
 }
 
-// ══════════════════════════════════════
-// ACTIVIDADES
-// ══════════════════════════════════════
-
-model Actividad {
+model BitacoraClase {
   id            Int      @id @default(autoincrement())
-  fecha         DateTime @default(now())
+  fecha         DateTime @default(now()) @db.Date
   tema          String
   descripcion   String?
   tareaAsignada String?
@@ -494,45 +680,139 @@ model Actividad {
   actualizadoEn DateTime @updatedAt
 
   docenteMateriaCursoId Int
-  docenteMateriaCurso   DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id])
+  docenteMateriaCurso   DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Restrict)
+
+  trimestreId Int?
+  trimestre   Trimestre? @relation(fields: [trimestreId], references: [id], onDelete: SetNull)
+
+  @@index([docenteMateriaCursoId, fecha])
+  @@index([trimestreId])
+}
+
+model Calificacion {
+  id                 Int      @id @default(autoincrement())
+  promedioTrimestral Decimal? @db.Decimal(5, 2)
+
+  registradoEn  DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  inscripcionId         Int
+  docenteMateriaCursoId Int
+  trimestreId           Int
+
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id], onDelete: Restrict)
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Restrict)
+  trimestre           Trimestre           @relation(fields: [trimestreId], references: [id], onDelete: Restrict)
+
+  dimensiones CalificacionDimension[]
+  historial   HistorialCalificacion[]
+
+  @@unique([inscripcionId, docenteMateriaCursoId, trimestreId])
+  @@index([trimestreId])
+  @@index([inscripcionId])
+}
+
+model CalificacionDimension {
+  id             Int     @id @default(autoincrement())
+  calificacionId Int
+  dimensionId    Int
+  promedio       Decimal @db.Decimal(5, 2)
+
+  calificacion Calificacion        @relation(fields: [calificacionId], references: [id], onDelete: Restrict)
+  dimension    DimensionEvaluacion @relation(fields: [dimensionId], references: [id], onDelete: Restrict)
+
+  @@unique([calificacionId, dimensionId])
+  @@index([dimensionId])
+}
+
+model HistorialCalificacion {
+  id               Int      @id @default(autoincrement())
+  promedioAnterior Decimal? @db.Decimal(5, 2)
+  promedioNuevo    Decimal  @db.Decimal(5, 2)
+  motivo           String?
+  fecha            DateTime @default(now())
+
+  usuarioId Int
+  usuario   Usuario @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
+
+  calificacionId Int
+  calificacion   Calificacion @relation(fields: [calificacionId], references: [id], onDelete: Cascade)
+
+  @@index([calificacionId])
+  @@index([usuarioId])
+}
+
+model PromedioFinal {
+  id            Int       @id @default(autoincrement())
+  promedioFinal Decimal   @db.Decimal(5, 2)
+  resultado     Resultado @default(PENDIENTE)
+
+  calculadoEn   DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  inscripcionId         Int
+  docenteMateriaCursoId Int
+
+  inscripcion         Inscripcion         @relation(fields: [inscripcionId], references: [id], onDelete: Restrict)
+  docenteMateriaCurso DocenteMateriaCurso @relation(fields: [docenteMateriaCursoId], references: [id], onDelete: Restrict)
+
+  @@unique([inscripcionId, docenteMateriaCursoId])
+  @@index([inscripcionId])
 }
 
 // ══════════════════════════════════════
 // PAGOS
 // ══════════════════════════════════════
+// Dinero SIEMPRE Decimal(10,2) — nunca Float.
 
 model ConceptoPago {
-  id          Int     @id @default(autoincrement())
-  nombre      String
-  descripcion String?
-  monto       Float
-  obligatorio Boolean @default(true)
+  id               Int       @id @default(autoincrement())
+  nombre           String
+  descripcion      String?
+  monto            Decimal   @db.Decimal(10, 2)
+  obligatorio      Boolean   @default(true)
+  fechaVencimiento DateTime? @db.Date
+  aplicarMora      Boolean   @default(false)
+  porcentajeMora   Decimal   @default(0) @db.Decimal(5, 2)
+  activo           Boolean   @default(true)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   gestionId Int
-  gestion   Gestion @relation(fields: [gestionId], references: [id])
+  gestion   Gestion @relation(fields: [gestionId], references: [id], onDelete: Restrict)
 
   pagos Pago[]
+
+  @@index([gestionId])
+  @@index([activo])
 }
 
 model Pago {
   id            Int        @id @default(autoincrement())
-  montoPagado   Float
-  fechaPago     DateTime   @default(now())
+  montoOriginal Decimal    @db.Decimal(10, 2)
+  descuento     Decimal    @default(0) @db.Decimal(10, 2)
+  montoPagado   Decimal    @db.Decimal(10, 2)
+  fechaPago     DateTime   @default(now()) @db.Date
   metodoPago    MetodoPago @default(EFECTIVO)
   estado        EstadoPago @default(PAGADO)
   numeroRecibo  String?    @unique
+  serieRecibo   String?    @default("A")
   observaciones String?
 
-  creadoEn DateTime @default(now())
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
 
   inscripcionId   Int
   conceptoPagoId  Int
   registradoPorId Int?
 
-  inscripcion   Inscripcion  @relation(fields: [inscripcionId],   references: [id])
-  conceptoPago  ConceptoPago @relation(fields: [conceptoPagoId],  references: [id])
-  registradoPor Usuario?     @relation(fields: [registradoPorId], references: [id])
+  inscripcion   Inscripcion  @relation(fields: [inscripcionId], references: [id], onDelete: Restrict)
+  conceptoPago  ConceptoPago @relation(fields: [conceptoPagoId], references: [id], onDelete: Restrict)
+  registradoPor Usuario?     @relation(fields: [registradoPorId], references: [id], onDelete: SetNull)
+
+  @@index([inscripcionId])
+  @@index([conceptoPagoId])
+  @@index([estado])
+  @@index([fechaPago])
 }
