@@ -1,21 +1,22 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { aplanarPersona } from '../lib/persona.helper.js'
+import { NIVEL_TEXTO, siguienteNivelGrado } from '../lib/curso.helper.js'
 
 // ─── GET /api/gestiones ───────────────────────────────────────────────────────
 export const getGestiones = async (_req: Request, res: Response): Promise<void> => {
   try {
     const gestiones = await prisma.gestion.findMany({
       include: {
-        director: {
-          select: { id: true, nombre: true, apellido: true },
-        },
-        _count: {
-          select: { cursos: true, inscripciones: true, trimestres: true },
-        },
+        director: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
+        _count:   { select: { cursos: true, inscripciones: true, trimestres: true } },
       },
       orderBy: { anio: 'desc' },
     })
-    res.status(200).json(gestiones)
+    res.status(200).json(gestiones.map(g => ({
+      ...g,
+      director: g.director ? aplanarPersona(g.director) : null,
+    })))
   } catch (error) {
     console.error('[gestion.getGestiones]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -29,9 +30,9 @@ export const getGestionActiva = async (_req: Request, res: Response): Promise<vo
       where: { activa: true },
       include: {
         director: {
-          select: { id: true, nombre: true, apellido: true, telefono: true, email: true },
+          select: { id: true, persona: { select: { nombre: true, apellido: true, telefono: true, email: true } } },
         },
-        cursos:     { orderBy: { nivel: 'asc' } },
+        cursos:     { orderBy: [{ nivel: 'asc' }, { grado: 'asc' }] },
         trimestres: { orderBy: { numero: 'asc' } },
         _count:     { select: { inscripciones: true } },
       },
@@ -40,7 +41,7 @@ export const getGestionActiva = async (_req: Request, res: Response): Promise<vo
       res.status(404).json({ error: 'No hay gestión activa' })
       return
     }
-    res.status(200).json(gestion)
+    res.status(200).json({ ...gestion, director: gestion.director ? aplanarPersona(gestion.director) : null })
   } catch (error) {
     console.error('[gestion.getGestionActiva]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -54,8 +55,8 @@ export const getGestionById = async (req: Request, res: Response): Promise<void>
     const gestion = await prisma.gestion.findUnique({
       where: { id },
       include: {
-        director: { select: { id: true, nombre: true, apellido: true } },
-        cursos:        { orderBy: { nivel: 'asc' } },
+        director:      { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
+        cursos:        { orderBy: [{ nivel: 'asc' }, { grado: 'asc' }] },
         trimestres:    { orderBy: { numero: 'asc' } },
         conceptosPago: true,
         _count:        { select: { inscripciones: true, asignaciones: true } },
@@ -65,7 +66,7 @@ export const getGestionById = async (req: Request, res: Response): Promise<void>
       res.status(404).json({ error: 'Gestión no encontrada' })
       return
     }
-    res.status(200).json(gestion)
+    res.status(200).json({ ...gestion, director: gestion.director ? aplanarPersona(gestion.director) : null })
   } catch (error) {
     console.error('[gestion.getGestionById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -74,12 +75,13 @@ export const getGestionById = async (req: Request, res: Response): Promise<void>
 
 // ─── POST /api/gestiones ──────────────────────────────────────────────────────
 export const createGestion = async (req: Request, res: Response): Promise<void> => {
-  const { anio, descripcion, fechaInicio, fechaFin, directorId } = req.body as {
+  const { anio, descripcion, fechaInicio, fechaFin, directorId, notaMinimaAprobacion } = req.body as {
     anio?: number
     descripcion?: string
     fechaInicio?: string
     fechaFin?: string
     directorId?: number
+    notaMinimaAprobacion?: number
   }
 
   if (!anio) {
@@ -94,7 +96,6 @@ export const createGestion = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // Si se especifica un director, verificar que exista y esté activo
     if (directorId) {
       const director = await prisma.director.findUnique({ where: { id: directorId } })
       if (!director) {
@@ -113,13 +114,14 @@ export const createGestion = async (req: Request, res: Response): Promise<void> 
         descripcion: descripcion ?? `Gestión Escolar ${anio}`,
         fechaInicio: fechaInicio ? new Date(fechaInicio) : undefined,
         fechaFin:    fechaFin    ? new Date(fechaFin)    : undefined,
+        notaMinimaAprobacion,
         directorId,
       },
       include: {
-        director: { select: { nombre: true, apellido: true } },
+        director: { select: { persona: { select: { nombre: true, apellido: true } } } },
       },
     })
-    res.status(201).json(gestion)
+    res.status(201).json({ ...gestion, director: gestion.director ? aplanarPersona(gestion.director) : null })
   } catch (error) {
     console.error('[gestion.createGestion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -129,10 +131,11 @@ export const createGestion = async (req: Request, res: Response): Promise<void> 
 // ─── PUT /api/gestiones/:id ───────────────────────────────────────────────────
 export const updateGestion = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { descripcion, fechaInicio, fechaFin } = req.body as {
+  const { descripcion, fechaInicio, fechaFin, notaMinimaAprobacion } = req.body as {
     descripcion?: string
     fechaInicio?: string
     fechaFin?: string
+    notaMinimaAprobacion?: number
   }
 
   try {
@@ -145,9 +148,10 @@ export const updateGestion = async (req: Request, res: Response): Promise<void> 
     const gestion = await prisma.gestion.update({
       where: { id },
       data: {
-        ...(descripcion !== undefined && { descripcion }),
-        ...(fechaInicio !== undefined && { fechaInicio: new Date(fechaInicio) }),
-        ...(fechaFin    !== undefined && { fechaFin:    new Date(fechaFin) }),
+        ...(descripcion           !== undefined && { descripcion }),
+        ...(fechaInicio           !== undefined && { fechaInicio: new Date(fechaInicio) }),
+        ...(fechaFin              !== undefined && { fechaFin:    new Date(fechaFin) }),
+        ...(notaMinimaAprobacion  !== undefined && { notaMinimaAprobacion }),
       },
     })
     res.status(200).json(gestion)
@@ -158,9 +162,6 @@ export const updateGestion = async (req: Request, res: Response): Promise<void> 
 }
 
 // ─── PUT /api/gestiones/:id/director ─────────────────────────────────────────
-// Asigna o cambia el director de una gestión específica
-// ¿Por qué un endpoint separado? Porque cambiar el director
-// es una acción institucional importante que merece su propio registro
 export const asignarDirector = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { directorId } = req.body as { directorId?: number }
@@ -177,7 +178,10 @@ export const asignarDirector = async (req: Request, res: Response): Promise<void
       return
     }
 
-    const director = await prisma.director.findUnique({ where: { id: directorId } })
+    const director = await prisma.director.findUnique({
+      where: { id: directorId },
+      include: { persona: { select: { nombre: true, apellido: true } } },
+    })
     if (!director) {
       res.status(404).json({ error: 'Director no encontrado' })
       return
@@ -190,14 +194,12 @@ export const asignarDirector = async (req: Request, res: Response): Promise<void
     const actualizada = await prisma.gestion.update({
       where: { id },
       data:  { directorId },
-      include: {
-        director: { select: { id: true, nombre: true, apellido: true } },
-      },
+      include: { director: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } } },
     })
 
     res.status(200).json({
-      gestion: actualizada,
-      mensaje: `${director.nombre} ${director.apellido} asignado como director de la gestión ${gestion.anio}`,
+      gestion: { ...actualizada, director: aplanarPersona(actualizada.director!) },
+      mensaje: `${director.persona.nombre} ${director.persona.apellido} asignado como director de la gestión ${gestion.anio}`,
     })
   } catch (error) {
     console.error('[gestion.asignarDirector]', error)
@@ -216,7 +218,6 @@ export const activarGestion = async (req: Request, res: Response): Promise<void>
       return
     }
 
-    // Desactivar todas las demás
     await prisma.gestion.updateMany({
       where: { id: { not: id } },
       data:  { activa: false },
@@ -225,12 +226,12 @@ export const activarGestion = async (req: Request, res: Response): Promise<void>
     const actualizada = await prisma.gestion.update({
       where: { id },
       data:  { activa: true },
-      include: { director: { select: { nombre: true, apellido: true } } },
+      include: { director: { select: { persona: { select: { nombre: true, apellido: true } } } } },
     })
 
     res.status(200).json({
       message: `Gestión ${actualizada.anio} activada correctamente`,
-      gestion: actualizada,
+      gestion: { ...actualizada, director: actualizada.director ? aplanarPersona(actualizada.director) : null },
     })
   } catch (error) {
     console.error('[gestion.activarGestion]', error)
@@ -239,10 +240,6 @@ export const activarGestion = async (req: Request, res: Response): Promise<void>
 }
 
 // ─── POST /api/gestiones/:id/cerrar ──────────────────────────────────────────
-// ¿Por qué este endpoint? Marca formalmente el fin del año académico.
-// Antes de cerrar, verifica que todo esté en orden:
-//   1. Los 3 trimestres deben estar cerrados
-//   2. Todos los estudiantes activos deben tener un resultado final
 export const cerrarGestion = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
 
@@ -258,7 +255,6 @@ export const cerrarGestion = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // Verificar trimestres cerrados
     const trimestresAbiertos = await prisma.trimestre.findMany({
       where: { gestionId: id, cerrado: false },
     })
@@ -270,39 +266,27 @@ export const cerrarGestion = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // Verificar que todos los estudiantes ACTIVOS tengan resultado
     const sinResultado = await prisma.inscripcion.findMany({
-      where: {
-        gestionId: id,
-        estadoInscripcion: 'ACTIVA',
-        resultado: 'PENDIENTE',
-      },
-      include: {
-        estudiante: { select: { nombre: true, apellido: true } },
-      },
+      where: { gestionId: id, estadoInscripcion: 'ACTIVA', resultado: 'PENDIENTE' },
+      include: { estudiante: { select: { persona: { select: { nombre: true, apellido: true } } } } },
     })
     if (sinResultado.length > 0) {
       res.status(400).json({
         error: `${sinResultado.length} estudiantes activos sin resultado final registrado`,
         sugerencia: 'Registra PROMOVIDO o REPROBADO con POST /inscripciones/:id/resultado',
         estudiantesPendientes: sinResultado.map(
-          i => `${i.estudiante.nombre} ${i.estudiante.apellido}`
+          i => `${i.estudiante.persona.nombre} ${i.estudiante.persona.apellido}`
         ),
       })
       return
     }
 
-    // Marcar las inscripciones activas como CONCLUIDA
     await prisma.inscripcion.updateMany({
       where: { gestionId: id, estadoInscripcion: 'ACTIVA' },
       data:  { estadoInscripcion: 'CONCLUIDA' },
     })
 
-    // Desactivar la gestión
-    const cerrada = await prisma.gestion.update({
-      where: { id },
-      data:  { activa: false },
-    })
+    const cerrada = await prisma.gestion.update({ where: { id }, data: { activa: false } })
 
     res.status(200).json({
       message: `Gestión ${cerrada.anio} cerrada correctamente`,
@@ -316,23 +300,14 @@ export const cerrarGestion = async (req: Request, res: Response): Promise<void> 
 }
 
 // ─── GET /api/gestiones/:id/propuesta-inscripciones ──────────────────────────
-// ¿Por qué? La secretaria necesita ayuda para saber a qué curso
-// debe inscribir a cada estudiante el siguiente año, basándose
-// en el resultado de la gestión anterior.
-// ¿Para qué? No automatiza la inscripción (puede haber casos
-// especiales) pero SUGIERE el curso correcto para agilizar el proceso.
+// Reescrito para v6: antes comparaba insc.curso.nivel contra una lista
+// de strings tipo "Primero Secundaria"..."Sexto Secundaria" — eso ya no
+// existe. Ahora Curso.nivel es PRIMARIA|SECUNDARIA y Curso.grado es 1..6
+// por separado, así que la progresión se calcula con
+// siguienteNivelGrado() (6to Primaria → 1ro Secundaria, 6to Secundaria
+// → egresado).
 export const getPropuestaInscripciones = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-
-  // Orden de niveles para calcular el "siguiente curso"
-  const NIVELES = [
-    'Primero Secundaria',
-    'Segundo Secundaria',
-    'Tercero Secundaria',
-    'Cuarto Secundaria',
-    'Quinto Secundaria',
-    'Sexto Secundaria',
-  ]
 
   try {
     const gestion = await prisma.gestion.findUnique({ where: { id } })
@@ -344,62 +319,55 @@ export const getPropuestaInscripciones = async (req: Request, res: Response): Pr
     const inscripciones = await prisma.inscripcion.findMany({
       where: { gestionId: id },
       include: {
-        estudiante: { select: { id: true, nombre: true, apellido: true, ci: true } },
-        curso:      { select: { nivel: true, paralelo: true, nombre: true } },
+        estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } },
+        curso:      { select: { nivel: true, grado: true, paralelo: true } },
       },
       orderBy: [
         { curso: { nivel: 'asc' } },
-        { estudiante: { apellido: 'asc' } },
+        { curso: { grado: 'asc' } },
+        { estudiante: { persona: { apellido: 'asc' } } },
       ],
     })
 
     const propuesta = inscripciones.map(insc => {
-      const indexActual = NIVELES.indexOf(insc.curso.nivel)
-
       let cursoSugerido: string | null = null
       let accion = ''
 
-      if (insc.estadoInscripcion === 'RETIRADA') {
-        accion = 'NO_CONTINUA'
-      } else if (insc.estadoInscripcion === 'TRANSFERIDA') {
+      if (insc.estadoInscripcion === 'RETIRADA' || insc.estadoInscripcion === 'TRANSFERIDA') {
         accion = 'NO_CONTINUA'
       } else if (insc.resultado === 'REPROBADO') {
-        cursoSugerido = `${insc.curso.nivel} ${insc.curso.paralelo}`
+        cursoSugerido = `${insc.curso.grado}° ${NIVEL_TEXTO[insc.curso.nivel]} (repite, mismo paralelo sugerido: "${insc.curso.paralelo}")`
         accion = 'REPETIR_CURSO'
       } else if (insc.resultado === 'PROMOVIDO') {
-        if (indexActual === -1) {
-          accion = 'REVISAR_MANUALMENTE'
-        } else if (indexActual < NIVELES.length - 1) {
-          cursoSugerido = `${NIVELES[indexActual + 1]} ${insc.curso.paralelo}`
-          accion = 'PROMOVER'
-        } else {
+        const siguiente = siguienteNivelGrado(insc.curso.nivel, insc.curso.grado)
+        if (!siguiente) {
           accion = 'EGRESADO'
+        } else {
+          cursoSugerido = `${siguiente.grado}° ${NIVEL_TEXTO[siguiente.nivel]}`
+          accion = 'PROMOVER'
         }
       } else {
         accion = 'SIN_RESULTADO'
       }
 
       return {
-        estudianteId:  insc.estudiante.id,
-        estudiante:    `${insc.estudiante.nombre} ${insc.estudiante.apellido}`,
-        ci:            insc.estudiante.ci,
-        cursoActual:   insc.curso.nombre,
-        estado:        insc.estadoInscripcion,
-        resultado:     insc.resultado,
+        estudianteId: insc.estudiante.id,
+        estudiante:   `${insc.estudiante.persona.nombre} ${insc.estudiante.persona.apellido}`,
+        ci:           insc.estudiante.persona.ci,
+        cursoActual:  `${insc.curso.grado}° ${NIVEL_TEXTO[insc.curso.nivel]} "${insc.curso.paralelo}"`,
+        estado:       insc.estadoInscripcion,
+        resultado:    insc.resultado,
         accion,
         cursoSugerido,
       }
     })
 
-    // Resumen por tipo de acción
     const resumen = {
-      promover:          propuesta.filter(p => p.accion === 'PROMOVER').length,
-      repetir:            propuesta.filter(p => p.accion === 'REPETIR_CURSO').length,
-      egresados:          propuesta.filter(p => p.accion === 'EGRESADO').length,
-      noContinua:         propuesta.filter(p => p.accion === 'NO_CONTINUA').length,
-      revisarManualmente: propuesta.filter(p =>
-        p.accion === 'REVISAR_MANUALMENTE' || p.accion === 'SIN_RESULTADO'
-      ).length,
+      promover:  propuesta.filter(p => p.accion === 'PROMOVER').length,
+      repetir:   propuesta.filter(p => p.accion === 'REPETIR_CURSO').length,
+      egresados: propuesta.filter(p => p.accion === 'EGRESADO').length,
+      noContinua: propuesta.filter(p => p.accion === 'NO_CONTINUA').length,
+      revisarManualmente: propuesta.filter(p => p.accion === 'SIN_RESULTADO').length,
     }
 
     res.status(200).json({

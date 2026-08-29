@@ -1,12 +1,15 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { aplanarPersona } from '../lib/persona.helper.js'
+import { conNombre } from '../lib/curso.helper.js'
 
 // GET /api/materias
 export const getMaterias = async (_req: Request, res: Response): Promise<void> => {
   try {
     const materias = await prisma.materia.findMany({
       include: {
-        _count: { select: { asignaciones: true } },
+        campoSaber: { select: { id: true, nombre: true } },
+        _count:     { select: { asignaciones: true } },
       },
       orderBy: { nombre: 'asc' },
     })
@@ -24,10 +27,11 @@ export const getMateriaById = async (req: Request, res: Response): Promise<void>
     const materia = await prisma.materia.findUnique({
       where: { id },
       include: {
+        campoSaber: true,
         asignaciones: {
           include: {
-            docente: { select: { id: true, nombre: true, apellido: true } },
-            curso:   { select: { id: true, nombre: true } },
+            docente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
+            curso:   true,
             gestion: { select: { id: true, anio: true } },
           },
           orderBy: { gestion: { anio: 'desc' } },
@@ -38,7 +42,14 @@ export const getMateriaById = async (req: Request, res: Response): Promise<void>
       res.status(404).json({ error: 'Materia no encontrada' })
       return
     }
-    res.status(200).json(materia)
+    res.status(200).json({
+      ...materia,
+      asignaciones: materia.asignaciones.map(a => ({
+        ...a,
+        docente: aplanarPersona(a.docente),
+        curso:   conNombre(a.curso),
+      })),
+    })
   } catch (error) {
     console.error('[materia.getMateriaById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -47,10 +58,11 @@ export const getMateriaById = async (req: Request, res: Response): Promise<void>
 
 // POST /api/materias
 export const createMateria = async (req: Request, res: Response): Promise<void> => {
-  const { nombre, codigo, horasSemanales } = req.body as {
+  const { nombre, codigo, horasSemanales, campoSaberId } = req.body as {
     nombre?: string
     codigo?: string
     horasSemanales?: number
+    campoSaberId?: number
   }
 
   if (!nombre || !codigo) {
@@ -66,7 +78,7 @@ export const createMateria = async (req: Request, res: Response): Promise<void> 
     }
 
     const materia = await prisma.materia.create({
-      data: { nombre, codigo: codigo.toUpperCase(), horasSemanales: horasSemanales ?? 4 },
+      data: { nombre, codigo: codigo.toUpperCase(), horasSemanales: horasSemanales ?? 4, campoSaberId },
     })
     res.status(201).json(materia)
   } catch (error) {
@@ -78,9 +90,11 @@ export const createMateria = async (req: Request, res: Response): Promise<void> 
 // PUT /api/materias/:id
 export const updateMateria = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, horasSemanales } = req.body as {
+  const { nombre, horasSemanales, campoSaberId, activo } = req.body as {
     nombre?: string
     horasSemanales?: number
+    campoSaberId?: number
+    activo?: boolean
   }
 
   try {
@@ -95,6 +109,8 @@ export const updateMateria = async (req: Request, res: Response): Promise<void> 
       data: {
         ...(nombre         !== undefined && { nombre }),
         ...(horasSemanales !== undefined && { horasSemanales }),
+        ...(campoSaberId   !== undefined && { campoSaberId }),
+        ...(activo         !== undefined && { activo }),
       },
     })
     res.status(200).json(materia)

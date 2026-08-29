@@ -1,5 +1,7 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { aplanarPersona } from '../lib/persona.helper.js'
+import { conNombre } from '../lib/curso.helper.js'
 
 // GET /api/cursos
 export const getCursos = async (req: Request, res: Response): Promise<void> => {
@@ -14,9 +16,9 @@ export const getCursos = async (req: Request, res: Response): Promise<void> => {
         gestion: { select: { id: true, anio: true } },
         _count:  { select: { inscripciones: true, asignaciones: true } },
       },
-      orderBy: [{ nivel: 'asc' }, { paralelo: 'asc' }],
+      orderBy: [{ nivel: 'asc' }, { grado: 'asc' }, { paralelo: 'asc' }],
     })
-    res.status(200).json(cursos)
+    res.status(200).json(cursos.map(conNombre))
   } catch (error) {
     console.error('[curso.getCursos]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -31,14 +33,15 @@ export const getCursoById = async (req: Request, res: Response): Promise<void> =
       where: { id },
       include: {
         gestion: { select: { id: true, anio: true } },
+        tutorDocente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
         inscripciones: {
-          include: { estudiante: { select: { id: true, nombre: true, apellido: true } } },
-          orderBy: { estudiante: { apellido: 'asc' } },
+          include: { estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } } },
+          orderBy: { estudiante: { persona: { apellido: 'asc' } } },
         },
         asignaciones: {
           include: {
             materia: { select: { id: true, nombre: true } },
-            docente: { select: { id: true, nombre: true, apellido: true } },
+            docente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
           },
         },
       },
@@ -47,7 +50,12 @@ export const getCursoById = async (req: Request, res: Response): Promise<void> =
       res.status(404).json({ error: 'Curso no encontrado' })
       return
     }
-    res.status(200).json(curso)
+    res.status(200).json({
+      ...conNombre(curso),
+      tutorDocente: curso.tutorDocente ? aplanarPersona(curso.tutorDocente) : null,
+      inscripciones: curso.inscripciones.map(i => ({ ...i, estudiante: aplanarPersona(i.estudiante) })),
+      asignaciones: curso.asignaciones.map(a => ({ ...a, docente: aplanarPersona(a.docente) })),
+    })
   } catch (error) {
     console.error('[curso.getCursoById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -56,32 +64,38 @@ export const getCursoById = async (req: Request, res: Response): Promise<void> =
 
 // POST /api/cursos
 export const createCurso = async (req: Request, res: Response): Promise<void> => {
-  const { nombre, nivel, paralelo, gestionId } = req.body as {
-    nombre?: string
-    nivel?: string
-    paralelo?: string
+  const { nivel, grado, paralelo, turno, capacidad, gestionId } = req.body as {
+    nivel?:     'PRIMARIA' | 'SECUNDARIA'
+    grado?:     number
+    paralelo?:  string
+    turno?:     'MANANA' | 'TARDE' | 'NOCHE'
+    capacidad?: number
     gestionId?: number
   }
 
-  if (!nombre || !nivel || !paralelo || !gestionId) {
-    res.status(400).json({ error: 'nombre, nivel, paralelo y gestionId son obligatorios' })
+  if (!nivel || !grado || !paralelo || !gestionId) {
+    res.status(400).json({ error: 'nivel, grado, paralelo y gestionId son obligatorios' })
     return
   }
 
   try {
+    const turnoFinal = turno ?? 'MANANA'
+
     const existe = await prisma.curso.findUnique({
-      where: { nivel_paralelo_gestionId: { nivel, paralelo, gestionId } },
+      where: {
+        nivel_grado_paralelo_turno_gestionId: { nivel, grado, paralelo, turno: turnoFinal, gestionId },
+      },
     })
     if (existe) {
-      res.status(409).json({ error: `Ya existe el curso ${nivel} paralelo ${paralelo} en esta gestión` })
+      res.status(409).json({ error: `Ya existe el curso ${grado}° ${nivel} "${paralelo}" (${turnoFinal}) en esta gestión` })
       return
     }
 
     const curso = await prisma.curso.create({
-      data: { nombre, nivel, paralelo, gestionId },
+      data: { nivel, grado, paralelo, turno: turnoFinal, capacidad, gestionId },
       include: { gestion: { select: { id: true, anio: true } } },
     })
-    res.status(201).json(curso)
+    res.status(201).json(conNombre(curso))
   } catch (error) {
     console.error('[curso.createCurso]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -91,11 +105,17 @@ export const createCurso = async (req: Request, res: Response): Promise<void> =>
 // PUT /api/cursos/:id
 export const updateCurso = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, nivel, paralelo } = req.body as {
-    nombre?: string
-    nivel?: string
-    paralelo?: string
+  const { grado, paralelo, turno, capacidad, activo, tutorDocenteId } = req.body as {
+    grado?:          number
+    paralelo?:       string
+    turno?:          'MANANA' | 'TARDE' | 'NOCHE'
+    capacidad?:      number
+    activo?:         boolean
+    tutorDocenteId?: number | null
   }
+  // nivel NO se puede editar acá a propósito: cambiar el nivel de un
+  // curso ya con inscripciones rompe el historial académico. Si hace
+  // falta, se crea un curso nuevo.
 
   try {
     const existe = await prisma.curso.findUnique({ where: { id } })
@@ -107,12 +127,15 @@ export const updateCurso = async (req: Request, res: Response): Promise<void> =>
     const curso = await prisma.curso.update({
       where: { id },
       data: {
-        ...(nombre   !== undefined && { nombre }),
-        ...(nivel    !== undefined && { nivel }),
-        ...(paralelo !== undefined && { paralelo }),
+        ...(grado          !== undefined && { grado }),
+        ...(paralelo       !== undefined && { paralelo }),
+        ...(turno          !== undefined && { turno }),
+        ...(capacidad      !== undefined && { capacidad }),
+        ...(activo         !== undefined && { activo }),
+        ...(tutorDocenteId !== undefined && { tutorDocenteId }),
       },
     })
-    res.status(200).json(curso)
+    res.status(200).json(conNombre(curso))
   } catch (error) {
     console.error('[curso.updateCurso]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
