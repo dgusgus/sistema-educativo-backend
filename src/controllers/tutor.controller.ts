@@ -1,5 +1,7 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
+import type { PersonaInput } from '../lib/persona.helper.js'
 
 // GET /api/tutores
 export const getTutores = async (req: Request, res: Response): Promise<void> => {
@@ -7,24 +9,38 @@ export const getTutores = async (req: Request, res: Response): Promise<void> => 
 
   try {
     const tutores = await prisma.tutor.findMany({
-      where: search ? {
-        OR: [
-          { nombre:   { contains: search, mode: 'insensitive' } },
-          { apellido: { contains: search, mode: 'insensitive' } },
-          { ci:       { contains: search } },
-        ],
-      } : undefined,
+      where: search
+        ? {
+            persona: {
+              OR: [
+                { nombre:   { contains: search, mode: 'insensitive' } },
+                { apellido: { contains: search, mode: 'insensitive' } },
+                { ci:       { contains: search } },
+              ],
+            },
+          }
+        : undefined,
       include: {
+        persona: true,
         estudiantes: {
           include: {
-            estudiante: { select: { id: true, nombre: true, apellido: true, ci: true } },
+            estudiante: {
+              select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } },
+            },
           },
         },
         usuario: { select: { id: true, username: true, activo: true } },
       },
-      orderBy: [{ apellido: 'asc' }, { nombre: 'asc' }],
+      orderBy: { persona: { apellido: 'asc' } },
     })
-    res.status(200).json(tutores)
+
+    res.status(200).json(tutores.map(t => ({
+      ...aplanarPersona(t),
+      estudiantes: t.estudiantes.map(e => ({
+        ...e,
+        estudiante: { id: e.estudiante.id, ...e.estudiante.persona },
+      })),
+    })))
   } catch (error) {
     console.error('[tutor.getTutores]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -38,10 +54,12 @@ export const getTutorById = async (req: Request, res: Response): Promise<void> =
     const tutor = await prisma.tutor.findUnique({
       where: { id },
       include: {
+        persona: true,
         estudiantes: {
           include: {
             estudiante: {
               include: {
+                persona: { select: { nombre: true, apellido: true, ci: true } },
                 inscripciones: {
                   include: { curso: true, gestion: true },
                   orderBy: { gestion: { anio: 'desc' } },
@@ -58,7 +76,13 @@ export const getTutorById = async (req: Request, res: Response): Promise<void> =
       res.status(404).json({ error: 'Tutor no encontrado' })
       return
     }
-    res.status(200).json(tutor)
+    res.status(200).json({
+      ...aplanarPersona(tutor),
+      estudiantes: tutor.estudiantes.map(e => ({
+        ...e,
+        estudiante: aplanarPersona(e.estudiante),
+      })),
+    })
   } catch (error) {
     console.error('[tutor.getTutorById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -67,31 +91,42 @@ export const getTutorById = async (req: Request, res: Response): Promise<void> =
 
 // POST /api/tutores
 export const createTutor = async (req: Request, res: Response): Promise<void> => {
-  const { ci, nombre, apellido, telefono, email, parentesco } = req.body as {
+  const { ci, nombre, apellido, telefono, email, ocupacion, gradoInstruccion } = req.body as {
     ci?: string
     nombre?: string
     apellido?: string
     telefono?: string
     email?: string
-    parentesco?: string
+    ocupacion?: string
+    gradoInstruccion?: string
   }
+  // ⚠️ "parentesco" ya NO va acá — ahora vive en TutorEstudiante (el
+  // parentesco es respecto a CADA estudiante, no un atributo del tutor).
+  // Se registra al vincular: POST /api/tutores/:id/vincular/:estudianteId
 
-  if (!ci || !nombre || !apellido) {
-    res.status(400).json({ error: 'ci, nombre y apellido son obligatorios' })
+  const persona: PersonaInput = { ci: ci ?? '', nombre: nombre ?? '', apellido: apellido ?? '', telefono, email }
+  const errorPersona = validarPersona(persona)
+  if (errorPersona) {
+    res.status(400).json({ error: errorPersona })
     return
   }
 
   try {
-    const existe = await prisma.tutor.findUnique({ where: { ci } })
+    const existe = await buscarPersonaPorCi(persona.ci)
     if (existe) {
-      res.status(409).json({ error: `Ya existe un tutor con el CI ${ci}` })
+      res.status(409).json({ error: `Ya existe una persona registrada con el CI ${persona.ci}` })
       return
     }
 
-    const tutor = await prisma.tutor.create({
-      data: { ci, nombre, apellido, telefono, email, parentesco },
+    const tutor = await prisma.$transaction(async tx => {
+      const personaCreada = await crearPersona(tx, persona)
+      return tx.tutor.create({
+        data:    { personaId: personaCreada.id, ocupacion, gradoInstruccion },
+        include: { persona: true },
+      })
     })
-    res.status(201).json(tutor)
+
+    res.status(201).json(aplanarPersona(tutor))
   } catch (error) {
     console.error('[tutor.createTutor]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -101,12 +136,13 @@ export const createTutor = async (req: Request, res: Response): Promise<void> =>
 // PUT /api/tutores/:id
 export const updateTutor = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, apellido, telefono, email, parentesco } = req.body as {
+  const { nombre, apellido, telefono, email, ocupacion, gradoInstruccion } = req.body as {
     nombre?: string
     apellido?: string
     telefono?: string
     email?: string
-    parentesco?: string
+    ocupacion?: string
+    gradoInstruccion?: string
   }
 
   try {
@@ -116,17 +152,28 @@ export const updateTutor = async (req: Request, res: Response): Promise<void> =>
       return
     }
 
+    if (nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
+      await prisma.persona.update({
+        where: { id: existe.personaId },
+        data: {
+          ...(nombre   !== undefined && { nombre }),
+          ...(apellido !== undefined && { apellido }),
+          ...(telefono !== undefined && { telefono }),
+          ...(email    !== undefined && { email }),
+        },
+      })
+    }
+
     const tutor = await prisma.tutor.update({
       where: { id },
       data: {
-        ...(nombre      !== undefined && { nombre }),
-        ...(apellido    !== undefined && { apellido }),
-        ...(telefono    !== undefined && { telefono }),
-        ...(email       !== undefined && { email }),
-        ...(parentesco  !== undefined && { parentesco }),
+        ...(ocupacion        !== undefined && { ocupacion }),
+        ...(gradoInstruccion !== undefined && { gradoInstruccion }),
       },
+      include: { persona: true },
     })
-    res.status(200).json(tutor)
+
+    res.status(200).json(aplanarPersona(tutor))
   } catch (error) {
     console.error('[tutor.updateTutor]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -134,9 +181,21 @@ export const updateTutor = async (req: Request, res: Response): Promise<void> =>
 }
 
 // POST /api/tutores/:id/vincular/:estudianteId
+// Acá SÍ va el parentesco — es un dato de la relación, no del tutor.
 export const vincularEstudiante = async (req: Request, res: Response): Promise<void> => {
   const tutorId      = Number(req.params.id)
   const estudianteId = Number(req.params.estudianteId)
+  const { parentesco, esTutorPrincipal, esApoderado, viveConEstudiante } = req.body as {
+    parentesco?: string
+    esTutorPrincipal?: boolean
+    esApoderado?: boolean
+    viveConEstudiante?: boolean
+  }
+
+  if (!parentesco) {
+    res.status(400).json({ error: 'parentesco es obligatorio' })
+    return
+  }
 
   try {
     const existe = await prisma.tutorEstudiante.findUnique({
@@ -148,10 +207,15 @@ export const vincularEstudiante = async (req: Request, res: Response): Promise<v
     }
 
     const vinculo = await prisma.tutorEstudiante.create({
-      data: { tutorId, estudianteId },
+      data: {
+        tutorId, estudianteId, parentesco: parentesco as any,
+        esTutorPrincipal:  esTutorPrincipal  ?? false,
+        esApoderado:       esApoderado       ?? false,
+        viveConEstudiante: viveConEstudiante ?? true,
+      },
       include: {
-        tutor:      { select: { nombre: true, apellido: true } },
-        estudiante: { select: { nombre: true, apellido: true } },
+        tutor:      { select: { persona: { select: { nombre: true, apellido: true } } } },
+        estudiante: { select: { persona: { select: { nombre: true, apellido: true } } } },
       },
     })
     res.status(201).json({ message: 'Vinculación creada', vinculo })

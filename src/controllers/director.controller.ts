@@ -1,18 +1,23 @@
 import { Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import { prisma } from '../lib/prisma.js'
+import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
+import type { PersonaInput } from '../lib/persona.helper.js'
+
+const directorInclude = {
+  persona:   true,
+  usuario:   { select: { id: true, username: true, activo: true, roles: true } },
+  gestiones: { select: { id: true, anio: true, activa: true } },
+} as const
 
 // ─── GET /api/directores ──────────────────────────────────────────────────────
 export const getDirectores = async (_req: Request, res: Response): Promise<void> => {
   try {
     const directores = await prisma.director.findMany({
-      include: {
-        usuario:   { select: { id: true, username: true, activo: true } },
-        gestiones: { select: { id: true, anio: true, activa: true } },  // ✅ plural
-      },
-      orderBy: { apellido: 'asc' },
+      include:  directorInclude,
+      orderBy: { persona: { apellido: 'asc' } },
     })
-    res.status(200).json(directores)
+    res.status(200).json(directores.map(aplanarPersona))
   } catch (error) {
     console.error('[director.getDirectores]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -26,12 +31,13 @@ export const getDirectorActivo = async (_req: Request, res: Response): Promise<v
     const director = await prisma.director.findFirst({
       where: {
         activo:    true,
-        gestiones: { some: { activa: true } },  // ✅ filtrar por gestión activa
+        gestiones: { some: { activa: true } },
       },
       include: {
-        usuario:   { select: { id: true, username: true } },
+        persona: true,
+        usuario: { select: { id: true, username: true } },
         gestiones: {
-          where:  { activa: true },             // ✅ solo traer la gestión activa
+          where:  { activa: true },
           select: { id: true, anio: true },
         },
       },
@@ -42,7 +48,7 @@ export const getDirectorActivo = async (_req: Request, res: Response): Promise<v
       return
     }
 
-    res.status(200).json(director)
+    res.status(200).json(aplanarPersona(director))
   } catch (error) {
     console.error('[director.getDirectorActivo]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -54,11 +60,8 @@ export const getDirectorById = async (req: Request, res: Response): Promise<void
   const id = Number(req.params.id)
   try {
     const director = await prisma.director.findUnique({
-      where: { id },
-      include: {
-        usuario:   { select: { id: true, username: true, activo: true } },
-        gestiones: { select: { id: true, anio: true, activa: true } },  // ✅ plural
-      },
+      where:   { id },
+      include: directorInclude,
     })
 
     if (!director) {
@@ -66,7 +69,7 @@ export const getDirectorById = async (req: Request, res: Response): Promise<void
       return
     }
 
-    res.status(200).json(director)
+    res.status(200).json(aplanarPersona(director))
   } catch (error) {
     console.error('[director.getDirectorById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -74,7 +77,9 @@ export const getDirectorById = async (req: Request, res: Response): Promise<void
 }
 
 // ─── POST /api/directores/con-cuenta ─────────────────────────────────────────
-// Crea el perfil del director + su cuenta de acceso en una sola transacción
+// Crea la Persona + el perfil Director + su cuenta de acceso en una sola
+// transacción. En v6, Director.usuarioId es OBLIGATORIO (no nullable) —
+// un Director siempre nace con cuenta, no existe un "director sin cuenta".
 export const createDirectorConCuenta = async (req: Request, res: Response): Promise<void> => {
   const { ci, nombre, apellido, telefono, email, gestionId, username, password } =
     req.body as {
@@ -88,9 +93,11 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
       password?: string
     }
 
-  if (!ci || !nombre || !apellido || !username || !password) {
+  const persona: PersonaInput = { ci: ci ?? '', nombre: nombre ?? '', apellido: apellido ?? '', telefono, email }
+  const errorPersona = validarPersona(persona)
+  if (errorPersona || !username || !password) {
     res.status(400).json({
-      error: 'ci, nombre, apellido, username y password son obligatorios',
+      error: errorPersona ?? 'ci, nombre, apellido, username y password son obligatorios',
     })
     return
   }
@@ -101,11 +108,11 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
   }
 
   try {
-    const ciExiste   = await prisma.director.findUnique({ where: { ci } })
+    const ciExiste   = await buscarPersonaPorCi(persona.ci)
     const userExiste = await prisma.usuario.findUnique({ where: { username } })
 
     if (ciExiste) {
-      res.status(409).json({ error: `Ya existe un director con el CI ${ci}` })
+      res.status(409).json({ error: `Ya existe una persona registrada con el CI ${persona.ci}` })
       return
     }
     if (userExiste) {
@@ -117,11 +124,11 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
     if (gestionId) {
       const gestionConDirector = await prisma.gestion.findUnique({
         where:  { id: gestionId },
-        select: { directorId: true, director: { select: { nombre: true, apellido: true } } },
+        select: { directorId: true, director: { select: { persona: { select: { nombre: true, apellido: true } } } } },
       })
       if (gestionConDirector?.directorId) {
         res.status(409).json({
-          error: `La gestión ya tiene un director asignado: ${gestionConDirector.director?.nombre} ${gestionConDirector.director?.apellido}`,
+          error: `La gestión ya tiene un director asignado: ${gestionConDirector.director?.persona.nombre} ${gestionConDirector.director?.persona.apellido}`,
         })
         return
       }
@@ -132,31 +139,30 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
         data: {
           username,
           passwordHash: await bcrypt.hash(password, 12),
-          rol:    'DIRECTOR',
+          roles:  ['DIRECTOR'],
           activo: true,
         },
       })
 
+      const personaCreada = await crearPersona(tx, persona)
+
       const director = await tx.director.create({
-        data: { ci, nombre, apellido, telefono, email, usuarioId: usuario.id },
+        data: { personaId: personaCreada.id, usuarioId: usuario.id },
         include: {
-          usuario: { select: { id: true, username: true, rol: true } },
+          persona: true,
+          usuario: { select: { id: true, username: true, roles: true } },
         },
       })
 
-      // Si se especificó gestionId, asignar el director a esa gestión
       if (gestionId) {
-        await tx.gestion.update({
-          where: { id: gestionId },
-          data:  { directorId: director.id },
-        })
+        await tx.gestion.update({ where: { id: gestionId }, data: { directorId: director.id } })
       }
 
-      return { director, usuario }
+      return director
     })
 
     res.status(201).json({
-      director: resultado.director,
+      director: aplanarPersona(resultado),
       credenciales: {
         username,
         password,
@@ -187,21 +193,31 @@ export const updateDirector = async (req: Request, res: Response): Promise<void>
       return
     }
 
+    // nombre/apellido/telefono/email viven en Persona, no en Director
+    if (nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
+      await prisma.persona.update({
+        where: { id: existe.personaId },
+        data: {
+          ...(nombre   !== undefined && { nombre }),
+          ...(apellido !== undefined && { apellido }),
+          ...(telefono !== undefined && { telefono }),
+          ...(email    !== undefined && { email }),
+        },
+      })
+    }
+
     const director = await prisma.director.update({
       where: { id },
       data: {
-        ...(nombre   !== undefined && { nombre }),
-        ...(apellido !== undefined && { apellido }),
-        ...(telefono !== undefined && { telefono }),
-        ...(email    !== undefined && { email }),
-        ...(activo   !== undefined && { activo }),
+        ...(activo !== undefined && { activo }),
       },
       include: {
-        gestiones: { select: { id: true, anio: true, activa: true } },  // ✅ plural
+        persona:   true,
+        gestiones: { select: { id: true, anio: true, activa: true } },
       },
     })
 
-    res.status(200).json(director)
+    res.status(200).json(aplanarPersona(director))
   } catch (error) {
     console.error('[director.updateDirector]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -209,13 +225,17 @@ export const updateDirector = async (req: Request, res: Response): Promise<void>
 }
 
 // ─── PUT /api/directores/:id/cuenta ──────────────────────────────────────────
-// Asigna o crea una cuenta para un director que ya existe sin cuenta
+// Reasigna el director a OTRA cuenta ya existente con rol DIRECTOR.
+// (Ya no crea cuentas nuevas acá — Director.usuarioId es obligatorio
+// desde el nacimiento del registro, así que "asignar cuando falta" no
+// es un caso posible en v6. Para eso, usa createDirectorConCuenta.)
 export const asignarCuentaDirector = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { usuarioId, username, password } = req.body as {
-    usuarioId?: number
-    username?: string
-    password?: string
+  const { usuarioId } = req.body as { usuarioId?: number }
+
+  if (!usuarioId) {
+    res.status(400).json({ error: 'usuarioId es obligatorio' })
+    return
   }
 
   try {
@@ -225,71 +245,33 @@ export const asignarCuentaDirector = async (req: Request, res: Response): Promis
       return
     }
 
-    if (director.usuarioId) {
-      res.status(409).json({
-        error: 'Este director ya tiene una cuenta asignada',
-        usuarioId: director.usuarioId,
-      })
+    const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } })
+    if (!usuario) {
+      res.status(404).json({ error: 'Usuario no encontrado' })
       return
     }
-
-    let idUsuarioFinal: number
-
-    if (usuarioId) {
-      const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } })
-      if (!usuario) {
-        res.status(404).json({ error: 'Usuario no encontrado' })
-        return
-      }
-      if (usuario.rol !== 'DIRECTOR') {
-        res.status(400).json({ error: `El usuario tiene rol "${usuario.rol}" — debe ser DIRECTOR` })
-        return
-      }
-      const yaVinculado = await prisma.director.findFirst({ where: { usuarioId } })
-      if (yaVinculado) {
-        res.status(409).json({
-          error: `Este usuario ya está vinculado a ${yaVinculado.nombre} ${yaVinculado.apellido}`,
-        })
-        return
-      }
-      idUsuarioFinal = usuarioId
-
-    } else if (username && password) {
-      if (password.length < 6) {
-        res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' })
-        return
-      }
-      const userExiste = await prisma.usuario.findUnique({ where: { username } })
-      if (userExiste) {
-        res.status(409).json({ error: `El username "${username}" ya está en uso` })
-        return
-      }
-      const nuevoUsuario = await prisma.usuario.create({
-        data: {
-          username,
-          passwordHash: await bcrypt.hash(password, 12),
-          rol:    'DIRECTOR',
-          activo: true,
-        },
-      })
-      idUsuarioFinal = nuevoUsuario.id
-
-    } else {
-      res.status(400).json({
-        error: 'Envía "usuarioId" para vincular uno existente, o "username" + "password" para crear uno nuevo',
-      })
+    if (!usuario.roles.includes('DIRECTOR')) {
+      res.status(400).json({ error: 'El usuario no tiene el rol DIRECTOR' })
+      return
+    }
+    const yaVinculado = await prisma.director.findFirst({ where: { usuarioId } })
+    if (yaVinculado && yaVinculado.id !== id) {
+      res.status(409).json({ error: 'Este usuario ya está vinculado a otro director' })
       return
     }
 
     const actualizado = await prisma.director.update({
       where: { id },
-      data:  { usuarioId: idUsuarioFinal },
-      include: { usuario: { select: { id: true, username: true, rol: true } } },
+      data:  { usuarioId },
+      include: {
+        persona: true,
+        usuario: { select: { id: true, username: true, roles: true } },
+      },
     })
 
     res.status(200).json({
-      director: actualizado,
-      mensaje:  'Cuenta asignada correctamente',
+      director: aplanarPersona(actualizado),
+      mensaje:  'Cuenta reasignada correctamente',
     })
   } catch (error) {
     console.error('[director.asignarCuentaDirector]', error)

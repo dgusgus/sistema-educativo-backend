@@ -1,17 +1,22 @@
 import { Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import { prisma } from '../lib/prisma.js'
+import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
+import type { PersonaInput } from '../lib/persona.helper.js'
+
+const secretariaInclude = {
+  persona: true,
+  usuario: { select: { id: true, username: true, activo: true, roles: true } },
+} as const
 
 // ─── GET /api/secretarias ─────────────────────────────────────────────────────
 export const getSecretarias = async (_req: Request, res: Response): Promise<void> => {
   try {
     const secretarias = await prisma.secretaria.findMany({
-      include: {
-        usuario: { select: { id: true, username: true, activo: true } },
-      },
-      orderBy: { apellido: 'asc' },
+      include: secretariaInclude,
+      orderBy: { persona: { apellido: 'asc' } },
     })
-    res.status(200).json(secretarias)
+    res.status(200).json(secretarias.map(aplanarPersona))
   } catch (error) {
     console.error('[secretaria.getSecretarias]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -23,10 +28,8 @@ export const getSecretariaById = async (req: Request, res: Response): Promise<vo
   const id = Number(req.params.id)
   try {
     const secretaria = await prisma.secretaria.findUnique({
-      where: { id },
-      include: {
-        usuario: { select: { id: true, username: true, activo: true } },
-      },
+      where:   { id },
+      include: secretariaInclude,
     })
 
     if (!secretaria) {
@@ -34,7 +37,7 @@ export const getSecretariaById = async (req: Request, res: Response): Promise<vo
       return
     }
 
-    res.status(200).json(secretaria)
+    res.status(200).json(aplanarPersona(secretaria))
   } catch (error) {
     console.error('[secretaria.getSecretariaById]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -42,6 +45,8 @@ export const getSecretariaById = async (req: Request, res: Response): Promise<vo
 }
 
 // ─── POST /api/secretarias/con-cuenta ────────────────────────────────────────
+// Secretaria.usuarioId también es obligatorio en v6 — igual que Director,
+// siempre nace con cuenta.
 export const createSecretariaConCuenta = async (req: Request, res: Response): Promise<void> => {
   const { ci, nombre, apellido, telefono, email, username, password } =
     req.body as {
@@ -54,9 +59,11 @@ export const createSecretariaConCuenta = async (req: Request, res: Response): Pr
       password?: string
     }
 
-  if (!ci || !nombre || !apellido || !username || !password) {
+  const persona: PersonaInput = { ci: ci ?? '', nombre: nombre ?? '', apellido: apellido ?? '', telefono, email }
+  const errorPersona = validarPersona(persona)
+  if (errorPersona || !username || !password) {
     res.status(400).json({
-      error: 'ci, nombre, apellido, username y password son obligatorios',
+      error: errorPersona ?? 'ci, nombre, apellido, username y password son obligatorios',
     })
     return
   }
@@ -67,11 +74,11 @@ export const createSecretariaConCuenta = async (req: Request, res: Response): Pr
   }
 
   try {
-    const ciExiste   = await prisma.secretaria.findUnique({ where: { ci } })
+    const ciExiste   = await buscarPersonaPorCi(persona.ci)
     const userExiste = await prisma.usuario.findUnique({ where: { username } })
 
     if (ciExiste) {
-      res.status(409).json({ error: `Ya existe una secretaria con el CI ${ci}` })
+      res.status(409).json({ error: `Ya existe una persona registrada con el CI ${persona.ci}` })
       return
     }
     if (userExiste) {
@@ -84,23 +91,26 @@ export const createSecretariaConCuenta = async (req: Request, res: Response): Pr
         data: {
           username,
           passwordHash: await bcrypt.hash(password, 12),
-          rol:    'SECRETARIA',
+          roles:  ['SECRETARIA'],
           activo: true,
         },
       })
 
+      const personaCreada = await crearPersona(tx, persona)
+
       const secretaria = await tx.secretaria.create({
-        data: { ci, nombre, apellido, telefono, email, usuarioId: usuario.id },
+        data: { personaId: personaCreada.id, usuarioId: usuario.id },
         include: {
-          usuario: { select: { id: true, username: true, rol: true } },
+          persona: true,
+          usuario: { select: { id: true, username: true, roles: true } },
         },
       })
 
-      return { secretaria, usuario }
+      return secretaria
     })
 
     res.status(201).json({
-      secretaria: resultado.secretaria,
+      secretaria: aplanarPersona(resultado),
       credenciales: {
         username,
         password,
@@ -131,18 +141,25 @@ export const updateSecretaria = async (req: Request, res: Response): Promise<voi
       return
     }
 
+    if (nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
+      await prisma.persona.update({
+        where: { id: existe.personaId },
+        data: {
+          ...(nombre   !== undefined && { nombre }),
+          ...(apellido !== undefined && { apellido }),
+          ...(telefono !== undefined && { telefono }),
+          ...(email    !== undefined && { email }),
+        },
+      })
+    }
+
     const secretaria = await prisma.secretaria.update({
       where: { id },
-      data: {
-        ...(nombre   !== undefined && { nombre }),
-        ...(apellido !== undefined && { apellido }),
-        ...(telefono !== undefined && { telefono }),
-        ...(email    !== undefined && { email }),
-        ...(activo   !== undefined && { activo }),
-      },
+      data:  { ...(activo !== undefined && { activo }) },
+      include: { persona: true },
     })
 
-    res.status(200).json(secretaria)
+    res.status(200).json(aplanarPersona(secretaria))
   } catch (error) {
     console.error('[secretaria.updateSecretaria]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -150,12 +167,15 @@ export const updateSecretaria = async (req: Request, res: Response): Promise<voi
 }
 
 // ─── PUT /api/secretarias/:id/cuenta ─────────────────────────────────────────
+// Reasigna la secretaria a otra cuenta ya existente con rol SECRETARIA
+// (ver nota equivalente en director.controller.ts).
 export const asignarCuentaSecretaria = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { usuarioId, username, password } = req.body as {
-    usuarioId?: number
-    username?: string
-    password?: string
+  const { usuarioId } = req.body as { usuarioId?: number }
+
+  if (!usuarioId) {
+    res.status(400).json({ error: 'usuarioId es obligatorio' })
+    return
   }
 
   try {
@@ -165,71 +185,30 @@ export const asignarCuentaSecretaria = async (req: Request, res: Response): Prom
       return
     }
 
-    if (secretaria.usuarioId) {
-      res.status(409).json({
-        error: 'Esta secretaria ya tiene una cuenta asignada',
-        usuarioId: secretaria.usuarioId,
-      })
+    const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } })
+    if (!usuario) {
+      res.status(404).json({ error: 'Usuario no encontrado' })
       return
     }
-
-    let idUsuarioFinal: number
-
-    if (usuarioId) {
-      const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } })
-      if (!usuario) {
-        res.status(404).json({ error: 'Usuario no encontrado' })
-        return
-      }
-      if (usuario.rol !== 'SECRETARIA') {
-        res.status(400).json({ error: `El usuario tiene rol "${usuario.rol}" — debe ser SECRETARIA` })
-        return
-      }
-      const yaVinculada = await prisma.secretaria.findFirst({ where: { usuarioId } })
-      if (yaVinculada) {
-        res.status(409).json({
-          error: `Este usuario ya está vinculado a ${yaVinculada.nombre} ${yaVinculada.apellido}`,
-        })
-        return
-      }
-      idUsuarioFinal = usuarioId
-
-    } else if (username && password) {
-      if (password.length < 6) {
-        res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' })
-        return
-      }
-      const userExiste = await prisma.usuario.findUnique({ where: { username } })
-      if (userExiste) {
-        res.status(409).json({ error: `El username "${username}" ya está en uso` })
-        return
-      }
-      const nuevoUsuario = await prisma.usuario.create({
-        data: {
-          username,
-          passwordHash: await bcrypt.hash(password, 12),
-          rol:    'SECRETARIA',
-          activo: true,
-        },
-      })
-      idUsuarioFinal = nuevoUsuario.id
-
-    } else {
-      res.status(400).json({
-        error: 'Envía "usuarioId" para vincular uno existente, o "username" + "password" para crear uno nuevo',
-      })
+    if (!usuario.roles.includes('SECRETARIA')) {
+      res.status(400).json({ error: 'El usuario no tiene el rol SECRETARIA' })
+      return
+    }
+    const yaVinculada = await prisma.secretaria.findFirst({ where: { usuarioId } })
+    if (yaVinculada && yaVinculada.id !== id) {
+      res.status(409).json({ error: 'Este usuario ya está vinculado a otra secretaria' })
       return
     }
 
     const actualizada = await prisma.secretaria.update({
       where: { id },
-      data:  { usuarioId: idUsuarioFinal },
-      include: { usuario: { select: { id: true, username: true, rol: true } } },
+      data:  { usuarioId },
+      include: { persona: true, usuario: { select: { id: true, username: true, roles: true } } },
     })
 
     res.status(200).json({
-      secretaria: actualizada,
-      mensaje:    'Cuenta asignada correctamente',
+      secretaria: aplanarPersona(actualizada),
+      mensaje:    'Cuenta reasignada correctamente',
     })
   } catch (error) {
     console.error('[secretaria.asignarCuentaSecretaria]', error)
