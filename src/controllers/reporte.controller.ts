@@ -1,78 +1,56 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 import { crearDocumento, dibujarEncabezado, dibujarPiePagina, COLORES } from '../lib/pdf.js'
+import { aplanarPersona } from '../lib/persona.helper.js'
+import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 
 // ─── GET /api/dashboard ───────────────────────────────────────────────────────
-// Indicadores institucionales para el Director
 export const getDashboard = async (_req: Request, res: Response): Promise<void> => {
   try {
-    // Gestión activa
     const gestion = await prisma.gestion.findFirst({ where: { activa: true } })
     if (!gestion) {
       res.status(404).json({ error: 'No hay gestión activa' })
       return
     }
+    const notaMinima = Number(gestion.notaMinimaAprobacion)
 
-    // Total de estudiantes inscritos
-    const totalEstudiantes = await prisma.inscripcion.count({
-      where: { gestionId: gestion.id },
-    })
+    const totalEstudiantes = await prisma.inscripcion.count({ where: { gestionId: gestion.id } })
+    const totalDocentes    = await prisma.docente.count({ where: { activo: true } })
+    const totalCursos      = await prisma.curso.count({ where: { gestionId: gestion.id } })
 
-    // Total de docentes activos
-    const totalDocentes = await prisma.docente.count({ where: { activo: true } })
-
-    // Total de cursos activos
-    const totalCursos = await prisma.curso.count({ where: { gestionId: gestion.id } })
-
-    // Promedio general de calificaciones
+    // Antes: _avg de Calificacion.nota — ahora es promedioTrimestral
     const promedioCalificaciones = await prisma.calificacion.aggregate({
       where: { docenteMateriaCurso: { gestionId: gestion.id } },
-      _avg: { nota: true },
+      _avg: { promedioTrimestral: true },
     })
 
-    // Promedio de asistencia general
     const promedioAsistencia = await prisma.resumenAsistencia.aggregate({
       where: { docenteMateriaCurso: { gestionId: gestion.id } },
       _avg: { porcentaje: true },
     })
 
-    // Estudiantes en riesgo (asistencia < 80%)
     const estudiantesEnRiesgo = await prisma.resumenAsistencia.groupBy({
       by: ['inscripcionId'],
-      where: {
-        docenteMateriaCurso: { gestionId: gestion.id },
-        porcentaje: { lt: 80 },
-      },
+      where: { docenteMateriaCurso: { gestionId: gestion.id }, porcentaje: { lt: 80 } },
       _count: true,
     })
 
-    // Estudiantes con bajo rendimiento (promedio < 51)
+    // Antes: umbral fijo 51 — ahora Gestion.notaMinimaAprobacion
     const bajosRendimiento = await prisma.promedioFinal.groupBy({
       by: ['inscripcionId'],
-      where: {
-        docenteMateriaCurso: { gestionId: gestion.id },
-        promedioFinal: { lt: 51 },
-      },
+      where: { docenteMateriaCurso: { gestionId: gestion.id }, promedioFinal: { lt: notaMinima } },
       _count: true,
     })
 
-    // Pagos del período
     const totalRecaudado = await prisma.pago.aggregate({
-      where: {
-        estado: 'PAGADO',
-        inscripcion: { gestionId: gestion.id },
-      },
+      where: { estado: 'PAGADO', inscripcion: { gestionId: gestion.id } },
       _sum: { montoPagado: true },
     })
 
     const pagosPendientes = await prisma.pago.count({
-      where: {
-        estado: 'PENDIENTE',
-        inscripcion: { gestionId: gestion.id },
-      },
+      where: { estado: 'PENDIENTE', inscripcion: { gestionId: gestion.id } },
     })
 
-    // Estado de trimestres
     const trimestres = await prisma.trimestre.findMany({
       where: { gestionId: gestion.id },
       select: { numero: true, nombre: true, cerrado: true },
@@ -85,7 +63,7 @@ export const getDashboard = async (_req: Request, res: Response): Promise<void> 
         totalEstudiantes,
         totalDocentes,
         totalCursos,
-        promedioGeneral:     Number(promedioCalificaciones._avg.nota?.toFixed(2) ?? 0),
+        promedioGeneral:     Number(promedioCalificaciones._avg.promedioTrimestral?.toFixed(2) ?? 0),
         promedioAsistencia:  Number(promedioAsistencia._avg.porcentaje?.toFixed(2) ?? 0),
         estudiantesEnRiesgo: estudiantesEnRiesgo.length,
         bajosRendimiento:    bajosRendimiento.length,
@@ -102,7 +80,6 @@ export const getDashboard = async (_req: Request, res: Response): Promise<void> 
 }
 
 // ─── GET /api/reportes/academico ──────────────────────────────────────────────
-// Reporte académico filtrable por curso, materia y período
 export const getReporteAcademico = async (req: Request, res: Response): Promise<void> => {
   const { gestionId, cursoId, materiaId, trimestreId } = req.query as {
     gestionId?:   string
@@ -123,55 +100,41 @@ export const getReporteAcademico = async (req: Request, res: Response): Promise<
         ...(cursoId && { cursoId: Number(cursoId) }),
       },
       include: {
-        estudiante: { select: { nombre: true, apellido: true, ci: true } },
-        curso:      { select: { nombre: true, nivel: true } },
+        estudiante: { select: { persona: { select: { nombre: true, apellido: true, ci: true } } } },
+        curso:      { select: { nivel: true, grado: true, paralelo: true } },
         calificaciones: {
           where: {
-            ...(materiaId   && { docenteMateriaCurso: { materiaId:  Number(materiaId) } }),
+            ...(materiaId   && { docenteMateriaCurso: { materiaId: Number(materiaId) } }),
             ...(trimestreId && { trimestreId: Number(trimestreId) }),
           },
           include: {
-            docenteMateriaCurso: {
-              include: { materia: { select: { nombre: true } } },
-            },
+            docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } },
             trimestre: { select: { numero: true, nombre: true } },
           },
         },
         promediosFinales: {
-          where: {
-            ...(materiaId && { docenteMateriaCurso: { materiaId: Number(materiaId) } }),
-          },
-          include: {
-            docenteMateriaCurso: {
-              include: { materia: { select: { nombre: true } } },
-            },
-          },
+          where: { ...(materiaId && { docenteMateriaCurso: { materiaId: Number(materiaId) } }) },
+          include: { docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } } },
         },
         resumenAsistencias: {
-          where: {
-            ...(trimestreId && { trimestreId: Number(trimestreId) }),
-          },
-          include: {
-            docenteMateriaCurso: {
-              include: { materia: { select: { nombre: true } } },
-            },
-          },
+          where: { ...(trimestreId && { trimestreId: Number(trimestreId) }) },
+          include: { docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } } },
         },
       },
-      orderBy: [
-        { curso: { nivel: 'asc' } },
-        { estudiante: { apellido: 'asc' } },
-      ],
+      orderBy: [{ curso: { nivel: 'asc' } }, { estudiante: { persona: { apellido: 'asc' } } }],
     })
 
-    // Estadísticas globales del reporte
-    const todasLasNotas = inscripciones.flatMap(i => i.calificaciones.map(c => c.nota ?? 0))
+    // Antes: c.nota — ahora c.promedioTrimestral (puede ser null si aún no se calculó)
+    const todasLasNotas = inscripciones.flatMap(i =>
+      i.calificaciones.filter(c => c.promedioTrimestral !== null).map(c => Number(c.promedioTrimestral))
+    )
     const promedio = todasLasNotas.length
       ? todasLasNotas.reduce((a, b) => a + b, 0) / todasLasNotas.length
       : 0
 
+    // Antes: p.aprobado (boolean) — ahora p.resultado (enum)
     const aprobados = inscripciones.filter(i =>
-      i.promediosFinales.every(p => p.aprobado)
+      i.promediosFinales.length > 0 && i.promediosFinales.every(p => p.resultado === 'PROMOVIDO')
     ).length
 
     res.status(200).json({
@@ -181,11 +144,9 @@ export const getReporteAcademico = async (req: Request, res: Response): Promise<
         promedioGeneral:  Number(promedio.toFixed(2)),
         aprobados,
         reprobados:       inscripciones.length - aprobados,
-        tasaAprobacion:   inscripciones.length
-          ? Number(((aprobados / inscripciones.length) * 100).toFixed(1))
-          : 0,
+        tasaAprobacion:   inscripciones.length ? Number(((aprobados / inscripciones.length) * 100).toFixed(1)) : 0,
       },
-      detalle: inscripciones,
+      detalle: inscripciones.map(i => ({ ...i, estudiante: aplanarPersona(i.estudiante) })),
     })
   } catch (error) {
     console.error('[reporte.getReporteAcademico]', error)
@@ -194,7 +155,6 @@ export const getReporteAcademico = async (req: Request, res: Response): Promise<
 }
 
 // ─── GET /api/reportes/academico/pdf ─────────────────────────────────────────
-// Exporta el reporte académico en PDF
 export const getReporteAcademicoPDF = async (req: Request, res: Response): Promise<void> => {
   const { gestionId, cursoId } = req.query as {
     gestionId?: string
@@ -207,9 +167,12 @@ export const getReporteAcademicoPDF = async (req: Request, res: Response): Promi
   }
 
   try {
-    const gestion = await prisma.gestion.findUnique({
-      where: { id: Number(gestionId) },
-    })
+    const gestion = await prisma.gestion.findUnique({ where: { id: Number(gestionId) } })
+    if (!gestion) {
+      res.status(404).json({ error: 'Gestión no encontrada' })
+      return
+    }
+    const notaMinima = Number(gestion.notaMinimaAprobacion)
 
     const inscripciones = await prisma.inscripcion.findMany({
       where: {
@@ -217,57 +180,40 @@ export const getReporteAcademicoPDF = async (req: Request, res: Response): Promi
         ...(cursoId && { cursoId: Number(cursoId) }),
       },
       include: {
-        estudiante: { select: { nombre: true, apellido: true, ci: true } },
-        curso:      { select: { nombre: true, nivel: true } },
+        estudiante: { select: { persona: { select: { nombre: true, apellido: true, ci: true } } } },
+        curso:      { select: { nivel: true, grado: true, paralelo: true } },
         promediosFinales: {
-          include: {
-            docenteMateriaCurso: {
-              include: { materia: { select: { nombre: true } } },
-            },
-          },
+          include: { docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } } },
         },
         resumenAsistencias: true,
       },
-      orderBy: [
-        { curso: { nivel: 'asc' } },
-        { estudiante: { apellido: 'asc' } },
-      ],
+      orderBy: [{ curso: { nivel: 'asc' } }, { estudiante: { persona: { apellido: 'asc' } } }],
     })
 
     res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="reporte_academico_${gestion?.anio ?? ''}.pdf"`
-    )
+    res.setHeader('Content-Disposition', `attachment; filename="reporte_academico_${gestion.anio}.pdf"`)
 
     const doc = crearDocumento()
     doc.pipe(res)
 
     dibujarEncabezado(doc)
 
-    doc
-      .fillColor(COLORES.azulOscuro)
-      .fontSize(13)
-      .font('Helvetica-Bold')
-      .text(`REPORTE ACADÉMICO — GESTIÓN ${gestion?.anio ?? ''}`, { align: 'center' })
-      .moveDown(0.5)
+    doc.fillColor(COLORES.azulOscuro).fontSize(13).font('Helvetica-Bold')
+       .text(`REPORTE ACADÉMICO — GESTIÓN ${gestion.anio}`, { align: 'center' })
+       .moveDown(0.5)
 
-    doc
-      .fillColor(COLORES.grisMedio)
-      .fontSize(9)
-      .font('Helvetica')
-      .text(`Generado el ${new Date().toLocaleDateString('es-BO')}`, { align: 'center' })
-      .moveDown(1)
+    doc.fillColor(COLORES.grisMedio).fontSize(9).font('Helvetica')
+       .text(`Generado el ${new Date().toLocaleDateString('es-BO')}`, { align: 'center' })
+       .moveDown(1)
 
-    // Tabla principal
     const yT = doc.y
     const cols = [
-      { label: 'N°',         x: 52,  w: 25  },
-      { label: 'ESTUDIANTE', x: 80,  w: 170 },
-      { label: 'CURSO',      x: 253, w: 100 },
-      { label: 'PROM. FINAL',x: 356, w: 70  },
-      { label: '% ASIST.',   x: 429, w: 60  },
-      { label: 'RESULTADO',  x: 492, w: 70  },
+      { label: 'N°',          x: 52,  w: 25  },
+      { label: 'ESTUDIANTE',  x: 80,  w: 170 },
+      { label: 'CURSO',       x: 253, w: 100 },
+      { label: 'PROM. FINAL', x: 356, w: 70  },
+      { label: '% ASIST.',    x: 429, w: 60  },
+      { label: 'RESULTADO',   x: 492, w: 70  },
     ]
 
     doc.rect(50, yT, doc.page.width - 100, 22).fill(COLORES.azulOscuro)
@@ -280,45 +226,39 @@ export const getReporteAcademicoPDF = async (req: Request, res: Response): Promi
     let aprobados = 0
 
     inscripciones.forEach((insc, i) => {
-      // Calcular promedio general del estudiante
-      const promedios = insc.promediosFinales.map(p => p.promedioFinal)
-      const promGeneral = promedios.length
-        ? promedios.reduce((a, b) => a + b, 0) / promedios.length
-        : 0
+      const promedios = insc.promediosFinales.map(p => Number(p.promedioFinal))
+      const promGeneral = promedios.length ? promedios.reduce((a, b) => a + b, 0) / promedios.length : 0
 
-      // Calcular % asistencia general
-      const porcentajes = insc.resumenAsistencias.map(r => r.porcentaje)
-      const porcGeneral = porcentajes.length
-        ? porcentajes.reduce((a, b) => a + b, 0) / porcentajes.length
-        : 0
+      const porcentajes = insc.resumenAsistencias.map(r => Number(r.porcentaje))
+      const porcGeneral = porcentajes.length ? porcentajes.reduce((a, b) => a + b, 0) / porcentajes.length : 0
 
-      const aprobado = promGeneral >= 51
+      const aprobado = promGeneral >= notaMinima
       if (aprobado) aprobados++
 
       const fondo = i % 2 === 0 ? COLORES.grisClaro : COLORES.blanco
       doc.rect(50, yFila, doc.page.width - 100, 18).fill(fondo)
 
+      const nombreCurso = `${insc.curso.grado}° ${NIVEL_TEXTO[insc.curso.nivel]} "${insc.curso.paralelo}"`
+
       const datos = [
-        { texto: String(i + 1),              x: 52,  w: 25,  align: 'center' as const },
-        { texto: `${insc.estudiante.apellido}, ${insc.estudiante.nombre}`, x: 80, w: 170, align: 'left' as const },
-        { texto: insc.curso.nombre,           x: 253, w: 100, align: 'left'   as const },
-        { texto: promGeneral.toFixed(2),      x: 356, w: 70,  align: 'center' as const },
+        { texto: String(i + 1), x: 52,  w: 25,  align: 'center' as const },
+        { texto: `${insc.estudiante.persona.apellido}, ${insc.estudiante.persona.nombre}`, x: 80, w: 170, align: 'left' as const },
+        { texto: nombreCurso,   x: 253, w: 100, align: 'left'   as const },
+        { texto: promGeneral.toFixed(2), x: 356, w: 70, align: 'center' as const },
         { texto: `${porcGeneral.toFixed(1)}%`, x: 429, w: 60, align: 'center' as const },
         { texto: aprobado ? 'PROMOVIDO' : 'REPROBADO', x: 492, w: 70, align: 'center' as const },
       ]
 
       datos.forEach(d => {
         const esResultado = d.texto === 'PROMOVIDO' || d.texto === 'REPROBADO'
-        doc
-          .fillColor(d.texto === 'REPROBADO' ? COLORES.rojo : d.texto === 'PROMOVIDO' ? COLORES.verde : COLORES.grisOscuro)
-          .fontSize(8)
-          .font(esResultado ? 'Helvetica-Bold' : 'Helvetica')
-          .text(d.texto, d.x, yFila + 4, { width: d.w, align: d.align, lineBreak: false })
+        doc.fillColor(d.texto === 'REPROBADO' ? COLORES.rojo : d.texto === 'PROMOVIDO' ? COLORES.verde : COLORES.grisOscuro)
+           .fontSize(8)
+           .font(esResultado ? 'Helvetica-Bold' : 'Helvetica')
+           .text(d.texto, d.x, yFila + 4, { width: d.w, align: d.align, lineBreak: false })
       })
 
       yFila += 18
 
-      // Nueva página si se acaba el espacio
       if (yFila > doc.page.height - 80) {
         dibujarPiePagina(doc, Math.ceil((i + 1) / 30))
         doc.addPage()
@@ -327,19 +267,11 @@ export const getReporteAcademicoPDF = async (req: Request, res: Response): Promi
       }
     })
 
-    // Fila de totales
     doc.rect(50, yFila, doc.page.width - 100, 22).fill(COLORES.azulOscuro)
-    doc
-      .fillColor(COLORES.blanco)
-      .fontSize(9)
-      .font('Helvetica-Bold')
-      .text(`TOTAL: ${inscripciones.length} estudiantes`, 52, yFila + 6, { width: 250 })
-      .text(`Aprobados: ${aprobados}`, 305, yFila + 6, { width: 120, align: 'center' })
-      .text(
-        `Tasa: ${inscripciones.length ? ((aprobados / inscripciones.length) * 100).toFixed(1) : 0}%`,
-        428, yFila + 6,
-        { width: 134, align: 'center' }
-      )
+    doc.fillColor(COLORES.blanco).fontSize(9).font('Helvetica-Bold')
+       .text(`TOTAL: ${inscripciones.length} estudiantes`, 52, yFila + 6, { width: 250 })
+       .text(`Aprobados: ${aprobados}`, 305, yFila + 6, { width: 120, align: 'center' })
+       .text(`Tasa: ${inscripciones.length ? ((aprobados / inscripciones.length) * 100).toFixed(1) : 0}%`, 428, yFila + 6, { width: 134, align: 'center' })
 
     dibujarPiePagina(doc, 1)
     doc.end()

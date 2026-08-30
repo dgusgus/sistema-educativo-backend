@@ -1,7 +1,6 @@
 import { Router } from 'express'
 import {
   getCalificaciones,
-  registrarCalificaciones,
   updateCalificacion,
   cerrarTrimestre,
   getCalificacionesEstudiante,
@@ -13,20 +12,22 @@ import { requireRol }     from '../middlewares/rbac.middleware.js'
 const router = Router()
 router.use(authMiddleware)
 
-// Planilla del docente
+// Planilla del docente (ahora con promedio ya calculado por dimensión)
 router.get(
   '/',
   requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'),
   getCalificaciones
 )
-router.post(
-  '/',
-  requireRol('DOCENTE'),
-  registrarCalificaciones
-)
+
+// ⚠️ Ya NO hay POST '/' — antes el docente escribía la nota directo acá.
+// Ahora se registra vía POST /api/actividades-evaluativas/:id/notas
+// (evaluacion.routes.ts), que recalcula el promedio automáticamente.
+
+// Corrección manual — solo funciona con el trimestre CERRADO (ver
+// comentario en el controller)
 router.put(
   '/:id',
-  requireRol('DOCENTE'),
+  requireRol('DIRECTOR', 'SECRETARIA'),
   updateCalificacion
 )
 

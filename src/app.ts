@@ -14,6 +14,7 @@ import inscripcionRoutes  from './routes/inscripcion.routes.js'
 import tutorRoutes        from './routes/tutor.routes.js'
 import asistenciaRoutes   from './routes/asistencia.routes.js'
 import calificacionRoutes from './routes/calificacion.routes.js'
+import evaluacionRoutes   from './routes/evaluacion.routes.js'
 import actividadRoutes    from './routes/actividad.routes.js'
 import pagoRoutes         from './routes/pago.routes.js'
 import boletinRoutes      from './routes/boletin.routes.js'
@@ -62,6 +63,8 @@ app.use('/api/secretarias', secretariaRoutes)
 // Académico
 app.use('/api/asistencia',    asistenciaRoutes)
 app.use('/api/calificaciones',calificacionRoutes)
+// Dimensiones / actividades evaluativas / notas — ver evaluacion.routes.ts
+app.use('/api',               evaluacionRoutes)
 app.use('/api/actividades',   actividadRoutes)
 
 // Pagos

@@ -1,9 +1,10 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { aplanarPersona } from '../lib/persona.helper.js'
 
 // ─── GET /api/calificaciones ──────────────────────────────────────────────────
-// El docente ve la planilla de notas de su materia por trimestre
-// Query params: docenteMateriaCursoId, trimestreId
+// Planilla del docente: promedio ya calculado (ver evaluacion.controller.ts
+// y calificacion.helper.ts para cómo se arma), con el desglose por dimensión.
 export const getCalificaciones = async (req: Request, res: Response): Promise<void> => {
   const { docenteMateriaCursoId, trimestreId } = req.query as {
     docenteMateriaCursoId?: string
@@ -11,9 +12,7 @@ export const getCalificaciones = async (req: Request, res: Response): Promise<vo
   }
 
   if (!docenteMateriaCursoId || !trimestreId) {
-    res.status(400).json({
-      error: 'docenteMateriaCursoId y trimestreId son obligatorios',
-    })
+    res.status(400).json({ error: 'docenteMateriaCursoId y trimestreId son obligatorios' })
     return
   }
 
@@ -21,71 +20,57 @@ export const getCalificaciones = async (req: Request, res: Response): Promise<vo
     const dmcId  = Number(docenteMateriaCursoId)
     const trimId = Number(trimestreId)
 
-    // Verificar acceso del docente
-    if (req.user?.rol === 'DOCENTE') {
-      const docente = await prisma.docente.findFirst({
-        where: { usuarioId: req.user.id },
-      })
-      const asignacion = await prisma.docenteMateriaCurso.findFirst({
-        where: { id: dmcId, docenteId: docente?.id },
-      })
+    if (req.user?.roles.includes('DOCENTE') && !req.user.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r))) {
+      const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user.id } })
+      const asignacion = await prisma.docenteMateriaCurso.findFirst({ where: { id: dmcId, docenteId: docente?.id } })
       if (!asignacion) {
         res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
         return
       }
     }
 
-    // Obtener la asignación con info de materia y curso
     const dmc = await prisma.docenteMateriaCurso.findUnique({
       where: { id: dmcId },
       include: {
-        materia:  { select: { id: true, nombre: true } },
-        curso:    { select: { id: true, nombre: true } },
-        gestion:  { select: { id: true, anio: true } },
+        materia: { select: { id: true, nombre: true } },
+        curso:   { select: { id: true, nivel: true, grado: true, paralelo: true } },
+        gestion: { select: { id: true, anio: true } },
       },
     })
-
     if (!dmc) {
       res.status(404).json({ error: 'Asignación no encontrada' })
       return
     }
 
-    // Obtener trimestre
-    const trimestre = await prisma.trimestre.findUnique({
-      where: { id: trimId },
-    })
-
+    const trimestre = await prisma.trimestre.findUnique({ where: { id: trimId } })
     if (!trimestre) {
       res.status(404).json({ error: 'Trimestre no encontrado' })
       return
     }
 
-    // Obtener todos los estudiantes del curso con sus notas
     const inscripciones = await prisma.inscripcion.findMany({
       where: { cursoId: dmc.cursoId, gestionId: dmc.gestionId },
       include: {
-        estudiante: {
-          select: { id: true, nombre: true, apellido: true, ci: true },
-        },
+        estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } },
         calificaciones: {
-          where: {
-            docenteMateriaCursoId: dmcId,
-            trimestreId: trimId,
-          },
+          where: { docenteMateriaCursoId: dmcId, trimestreId: trimId },
+          include: { dimensiones: { include: { dimension: { select: { nombre: true } } } } },
         },
       },
-      orderBy: { estudiante: { apellido: 'asc' } },
+      orderBy: { estudiante: { persona: { apellido: 'asc' } } },
     })
 
-    // Armar la planilla
-    const planilla = inscripciones.map(insc => ({
-      inscripcionId:   insc.id,
-      estudiante:      insc.estudiante,
-      calificacionId:  insc.calificaciones[0]?.id ?? null,
-      nota:            insc.calificaciones[0]?.nota ?? null,
-      promedio:        insc.calificaciones[0]?.promedioTrimestral ?? null,
-      registrado:      insc.calificaciones.length > 0,
-    }))
+    const planilla = inscripciones.map(insc => {
+      const cal = insc.calificaciones[0]
+      return {
+        inscripcionId:  insc.id,
+        estudiante:     { id: insc.estudiante.id, ...insc.estudiante.persona },
+        calificacionId: cal?.id ?? null,
+        promedio:       cal?.promedioTrimestral ?? null,
+        dimensiones:    cal?.dimensiones.map(d => ({ nombre: d.dimension.nombre, promedio: d.promedio })) ?? [],
+        registrado:     cal?.promedioTrimestral != null,
+      }
+    })
 
     res.status(200).json({
       dmc,
@@ -101,118 +86,28 @@ export const getCalificaciones = async (req: Request, res: Response): Promise<vo
   }
 }
 
-// ─── POST /api/calificaciones ─────────────────────────────────────────────────
-// El docente registra las notas de toda la planilla de una vez
-// Body: { docenteMateriaCursoId, trimestreId, notas: [{inscripcionId, nota}] }
-export const registrarCalificaciones = async (req: Request, res: Response): Promise<void> => {
-  const { docenteMateriaCursoId, trimestreId, notas } = req.body as {
-    docenteMateriaCursoId?: number
-    trimestreId?: number
-    notas?: Array<{ inscripcionId: number; nota: number }>
-  }
-
-  if (!docenteMateriaCursoId || !trimestreId || !notas?.length) {
-    res.status(400).json({
-      error: 'docenteMateriaCursoId, trimestreId y notas son obligatorios',
-    })
-    return
-  }
-
-  // Validar rango de notas (Ley 070: escala 1-100)
-  const notaInvalida = notas.find(n => n.nota < 1 || n.nota > 100)
-  if (notaInvalida) {
-    res.status(400).json({
-      error: `Nota inválida: ${notaInvalida.nota}. La escala es 1-100 conforme a la Ley 070`,
-    })
-    return
-  }
-
-  try {
-    // Verificar que el trimestre no esté cerrado
-    const trimestre = await prisma.trimestre.findUnique({
-      where: { id: trimestreId },
-    })
-    if (!trimestre) {
-      res.status(404).json({ error: 'Trimestre no encontrado' })
-      return
-    }
-    if (trimestre.cerrado) {
-      res.status(403).json({
-        error: 'El trimestre está cerrado — no se pueden modificar calificaciones',
-      })
-      return
-    }
-
-    // Verificar acceso del docente
-    if (req.user?.rol === 'DOCENTE') {
-      const docente = await prisma.docente.findFirst({
-        where: { usuarioId: req.user.id },
-      })
-      const asignacion = await prisma.docenteMateriaCurso.findFirst({
-        where: { id: docenteMateriaCursoId, docenteId: docente?.id },
-      })
-      if (!asignacion) {
-        res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
-        return
-      }
-    }
-
-    // Registrar o actualizar notas (upsert)
-    // La nota trimestral = la nota registrada (el promedio puede venir de
-    // múltiples evaluaciones pero en este sistema se registra el promedio final)
-    const resultado = await prisma.$transaction(
-      notas.map(n =>
-        prisma.calificacion.upsert({
-          where: {
-            inscripcionId_docenteMateriaCursoId_trimestreId: {
-              inscripcionId:         n.inscripcionId,
-              docenteMateriaCursoId,
-              trimestreId,
-            },
-          },
-          update: {
-            nota:               n.nota,
-            promedioTrimestral: n.nota,
-          },
-          create: {
-            inscripcionId:         n.inscripcionId,
-            docenteMateriaCursoId,
-            trimestreId,
-            nota:               n.nota,
-            promedioTrimestral: n.nota,
-          },
-        })
-      )
-    )
-
-    // Calcular promedios finales por materia si existen los 3 trimestres
-    await calcularPromediosFinales(docenteMateriaCursoId)
-
-    res.status(201).json({
-      registradas: resultado.length,
-      trimestreId,
-      docenteMateriaCursoId,
-    })
-  } catch (error) {
-    console.error('[calificacion.registrarCalificaciones]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
-  }
-}
-
 // ─── PUT /api/calificaciones/:id ──────────────────────────────────────────────
-// Editar una nota individual antes del cierre del trimestre
-export const updateCalificacion = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const id   = Number(req.params.id)
-  const { nota, motivo } = req.body as {
-    nota?:   number
-    motivo?: string  // ← nuevo campo
+// Corrección MANUAL de un promedio ya calculado. Solo tiene sentido con
+// el trimestre CERRADO — el comentario del schema es explícito: "una vez
+// cerrado, cualquier corrección pasa por HistorialCalificacion, nunca un
+// UPDATE directo". Mientras el trimestre está abierto, el promedio se
+// corrige registrando/editando la NotaActividad correspondiente (POST
+// /api/actividades-evaluativas/:id/notas), que dispara el recálculo
+// automático — por eso este endpoint RECHAZA la edición si el trimestre
+// sigue abierto (evita dos caminos distintos escribiendo el mismo campo).
+export const updateCalificacion = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const { promedioTrimestral, motivo } = req.body as {
+    promedioTrimestral?: number
+    motivo?: string
   }
 
-  if (nota === undefined || nota < 1 || nota > 100) {
-    res.status(400).json({ error: 'nota debe estar entre 1 y 100 (Ley 070)' })
+  if (promedioTrimestral === undefined) {
+    res.status(400).json({ error: 'promedioTrimestral es obligatorio' })
+    return
+  }
+  if (!motivo) {
+    res.status(400).json({ error: 'motivo es obligatorio para una corrección manual' })
     return
   }
 
@@ -227,39 +122,27 @@ export const updateCalificacion = async (
       return
     }
 
-    if (calificacion.trimestre.cerrado) {
-      res.status(403).json({
-        error: 'No se puede editar — el trimestre está cerrado',
+    if (!calificacion.trimestre.cerrado) {
+      res.status(400).json({
+        error: 'El trimestre está abierto — corrige la nota desde la actividad evaluativa (POST /api/actividades-evaluativas/:id/notas), no acá',
       })
       return
     }
 
-    // Guardar en historial + actualizar nota en una transacción
     const [historial, calificacionActualizada] = await prisma.$transaction([
-      // 1. Registrar el cambio en el historial
       prisma.historialCalificacion.create({
         data: {
-          notaAnterior:  calificacion.nota,
-          notaNueva:     nota,
-          motivo:        motivo ?? 'Sin motivo especificado',
-          usuarioId:     req.user!.id,
-          calificacionId: id,
+          promedioAnterior: calificacion.promedioTrimestral,
+          promedioNuevo:    promedioTrimestral,
+          motivo,
+          usuarioId:        req.user!.id,
+          calificacionId:   id,
         },
       }),
-      // 2. Actualizar la nota
-      prisma.calificacion.update({
-        where: { id },
-        data:  { nota, promedioTrimestral: nota },
-      }),
+      prisma.calificacion.update({ where: { id }, data: { promedioTrimestral } }),
     ])
 
-    // Recalcular promedios finales
-    await calcularPromediosFinales(calificacion.docenteMateriaCursoId)
-
-    res.status(200).json({
-      calificacion: calificacionActualizada,
-      historial,
-    })
+    res.status(200).json({ calificacion: calificacionActualizada, historial })
   } catch (error) {
     console.error('[calificacion.updateCalificacion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -267,55 +150,58 @@ export const updateCalificacion = async (
 }
 
 // ─── POST /api/trimestres/:id/cerrar ─────────────────────────────────────────
-// Cierra el trimestre — las notas quedan bloqueadas
 export const cerrarTrimestre = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
 
   try {
-    const trimestre = await prisma.trimestre.findUnique({
-      where: { id },
-      include: { gestion: { include: { cursos: true } } },
-    })
-
+    const trimestre = await prisma.trimestre.findUnique({ where: { id } })
     if (!trimestre) {
       res.status(404).json({ error: 'Trimestre no encontrado' })
       return
     }
-
     if (trimestre.cerrado) {
       res.status(400).json({ error: 'El trimestre ya está cerrado' })
       return
     }
 
-    // Verificar que todas las calificaciones estén registradas
-    // (al menos una nota por cada inscripción activa en la gestión)
-    const inscripciones = await prisma.inscripcion.findMany({
-      where: { gestionId: trimestre.gestionId },
-      select: { id: true },
-    })
+    // Completitud: cada materia (DocenteMateriaCurso) de la gestión debe
+    // tener un promedioTrimestral calculado para cada estudiante ACTIVO
+    // inscrito en su curso.
+    const dmcs = await prisma.docenteMateriaCurso.findMany({ where: { gestionId: trimestre.gestionId } })
+    const incompletos: Array<{ docenteMateriaCursoId: number; faltantes: number }> = []
 
-    const calificaciones = await prisma.calificacion.findMany({
-      where: { trimestreId: id },
-      select: { inscripcionId: true },
-    })
+    for (const dmc of dmcs) {
+      const inscripciones = await prisma.inscripcion.findMany({
+        where: { cursoId: dmc.cursoId, gestionId: dmc.gestionId, estadoInscripcion: 'ACTIVA' },
+        select: { id: true },
+      })
+      if (inscripciones.length === 0) continue
 
-    const sinNota = inscripciones.filter(
-      insc => !calificaciones.some(c => c.inscripcionId === insc.id)
-    )
+      const calificaciones = await prisma.calificacion.findMany({
+        where: { docenteMateriaCursoId: dmc.id, trimestreId: id, promedioTrimestral: { not: null } },
+        select: { inscripcionId: true },
+      })
+      const faltantes = inscripciones.filter(i => !calificaciones.some(c => c.inscripcionId === i.id))
+      if (faltantes.length > 0) incompletos.push({ docenteMateriaCursoId: dmc.id, faltantes: faltantes.length })
+    }
 
-    if (sinNota.length > 0) {
+    if (incompletos.length > 0) {
       res.status(400).json({
-        error: `Hay ${sinNota.length} estudiantes sin calificaciones registradas`,
-        sugerencia: 'Registra todas las notas antes de cerrar el trimestre',
+        error: 'Hay materias con estudiantes sin promedio calculado en este trimestre',
+        sugerencia: 'Registra todas las notas de actividades pendientes antes de cerrar',
+        incompletos,
       })
       return
     }
 
-    // Cerrar el trimestre
-    const trimCerrado = await prisma.trimestre.update({
-      where: { id },
-      data: { cerrado: true },
-    })
+    const trimCerrado = await prisma.trimestre.update({ where: { id }, data: { cerrado: true } })
+
+    // Al cerrar, recalcular promedios finales de todas las materias de la
+    // gestión (solo se materializan cuando existe nota de TODOS los
+    // trimestres de la gestión — ver calcularPromediosFinales).
+    for (const dmc of dmcs) {
+      await calcularPromediosFinales(dmc.id, trimestre.gestionId)
+    }
 
     res.status(200).json({
       message: `Trimestre "${trimestre.nombre}" cerrado correctamente`,
@@ -328,7 +214,6 @@ export const cerrarTrimestre = async (req: Request, res: Response): Promise<void
 }
 
 // ─── GET /api/calificaciones/estudiante ──────────────────────────────────────
-// Estudiante o Tutor consultan sus propias notas
 export const getCalificacionesEstudiante = async (req: Request, res: Response): Promise<void> => {
   const { estudianteId, gestionId } = req.query as {
     estudianteId?: string
@@ -337,29 +222,23 @@ export const getCalificacionesEstudiante = async (req: Request, res: Response): 
 
   try {
     let estId: number
+    const soloFamilia = req.user ? req.user.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r)) : false
 
-    if (req.user?.rol === 'ESTUDIANTE') {
-      const estudiante = await prisma.estudiante.findFirst({
-        where: { usuarioId: req.user.id },
-      })
+    if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
+      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
       if (!estudiante) {
         res.status(403).json({ error: 'Perfil de estudiante no encontrado' })
         return
       }
       estId = estudiante.id
 
-    } else if (req.user?.rol === 'TUTOR') {
+    } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
       if (!estudianteId) {
         res.status(400).json({ error: 'estudianteId es requerido' })
         return
       }
-      // Verificar vínculo tutor → estudiante
-      const tutor = await prisma.tutor.findFirst({
-        where: { usuarioId: req.user.id },
-      })
-      const vinculo = await prisma.tutorEstudiante.findFirst({
-        where: { tutorId: tutor?.id, estudianteId: Number(estudianteId) },
-      })
+      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
+      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId: Number(estudianteId) } })
       if (!vinculo) {
         res.status(403).json({ error: 'Sin permisos para ver este estudiante' })
         return
@@ -374,32 +253,21 @@ export const getCalificacionesEstudiante = async (req: Request, res: Response): 
       estId = Number(estudianteId)
     }
 
-    // Obtener inscripciones del estudiante
     const inscripciones = await prisma.inscripcion.findMany({
-      where: {
-        estudianteId: estId,
-        ...(gestionId && { gestionId: Number(gestionId) }),
-      },
+      where: { estudianteId: estId, ...(gestionId && { gestionId: Number(gestionId) }) },
       include: {
-        curso:   { select: { nombre: true } },
+        curso:   { select: { nivel: true, grado: true, paralelo: true } },
         gestion: { select: { anio: true } },
         calificaciones: {
           include: {
-            docenteMateriaCurso: {
-              include: { materia: { select: { nombre: true } } },
-            },
+            docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } },
             trimestre: { select: { numero: true, nombre: true } },
+            dimensiones: { include: { dimension: { select: { nombre: true } } } },
           },
-          orderBy: [
-            { trimestre: { numero: 'asc' } },
-          ],
+          orderBy: [{ trimestre: { numero: 'asc' } }],
         },
         promediosFinales: {
-          include: {
-            docenteMateriaCurso: {
-              include: { materia: { select: { nombre: true } } },
-            },
-          },
+          include: { docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } } },
         },
       },
     })
@@ -411,64 +279,14 @@ export const getCalificacionesEstudiante = async (req: Request, res: Response): 
   }
 }
 
-// ══════════════════════════════════════
-// FUNCIÓN AUXILIAR
-// ══════════════════════════════════════
-
-// Calcula el promedio final por materia cuando los 3 trimestres tienen nota
-async function calcularPromediosFinales(docenteMateriaCursoId: number) {
-  // Obtener todas las inscripciones con notas en esta materia
-  const calificaciones = await prisma.calificacion.findMany({
-    where: { docenteMateriaCursoId },
-    include: {
-      trimestre: { select: { numero: true } },
-    },
-  })
-
-  // Agrupar por inscripción
-  const porInscripcion: Record<number, number[]> = {}
-  for (const cal of calificaciones) {
-    if (!porInscripcion[cal.inscripcionId]) {
-      porInscripcion[cal.inscripcionId] = []
-    }
-    porInscripcion[cal.inscripcionId].push(cal.nota)
-  }
-
-  // Calcular promedio final si hay notas de los 3 trimestres
-  for (const [inscripcionIdStr, notas] of Object.entries(porInscripcion)) {
-    if (notas.length < 3) continue // No tiene todos los trimestres aún
-
-    const inscripcionId = Number(inscripcionIdStr)
-    const promedioFinal = notas.reduce((a, b) => a + b, 0) / notas.length
-    const aprobado      = promedioFinal >= 51 // Ley 070: mínimo para aprobar
-
-    await prisma.promedioFinal.upsert({
-      where: {
-        inscripcionId_docenteMateriaCursoId: {
-          inscripcionId,
-          docenteMateriaCursoId,
-        },
-      },
-      update: { promedioFinal, aprobado },
-      create: { inscripcionId, docenteMateriaCursoId, promedioFinal, aprobado },
-    })
-  }
-}
-
-// NUEVO endpoint — GET /api/calificaciones/:id/historial
-// El Director puede ver todos los cambios de una calificación
-export const getHistorialCalificacion = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+// ─── GET /api/calificaciones/:id/historial ───────────────────────────────────
+export const getHistorialCalificacion = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
 
   try {
     const historial = await prisma.historialCalificacion.findMany({
       where:   { calificacionId: id },
-      include: {
-        usuario: { select: { id: true, username: true, rol: true } },
-      },
+      include: { usuario: { select: { id: true, username: true, roles: true } } },
       orderBy: { fecha: 'desc' },
     })
 
@@ -476,5 +294,45 @@ export const getHistorialCalificacion = async (
   } catch (error) {
     console.error('[calificacion.getHistorialCalificacion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// ══════════════════════════════════════
+// FUNCIÓN AUXILIAR
+// ══════════════════════════════════════
+
+// ÚNICO escritor de PromedioFinal. Se llama al cerrar cada trimestre;
+// solo materializa el promedio cuando YA hay promedioTrimestral de TODOS
+// los trimestres de la gestión (antes era un "3" fijo — ahora se cuenta
+// dinámicamente, porque el número de trimestres es configurable).
+async function calcularPromediosFinales(docenteMateriaCursoId: number, gestionId: number) {
+  const totalTrimestres = await prisma.trimestre.count({ where: { gestionId } })
+
+  const gestion = await prisma.gestion.findUniqueOrThrow({
+    where: { id: gestionId }, select: { notaMinimaAprobacion: true },
+  })
+  const notaMinima = Number(gestion.notaMinimaAprobacion)
+
+  const calificaciones = await prisma.calificacion.findMany({
+    where: { docenteMateriaCursoId, promedioTrimestral: { not: null } },
+  })
+
+  const porInscripcion: Record<number, number[]> = {}
+  for (const cal of calificaciones) {
+    (porInscripcion[cal.inscripcionId] ??= []).push(Number(cal.promedioTrimestral))
+  }
+
+  for (const [inscripcionIdStr, promedios] of Object.entries(porInscripcion)) {
+    if (promedios.length < totalTrimestres) continue // faltan trimestres
+
+    const inscripcionId  = Number(inscripcionIdStr)
+    const promedioFinal  = promedios.reduce((a, b) => a + b, 0) / promedios.length
+    const resultado: 'PROMOVIDO' | 'REPROBADO' = promedioFinal >= notaMinima ? 'PROMOVIDO' : 'REPROBADO'
+
+    await prisma.promedioFinal.upsert({
+      where: { inscripcionId_docenteMateriaCursoId: { inscripcionId, docenteMateriaCursoId } },
+      update: { promedioFinal, resultado },
+      create: { inscripcionId, docenteMateriaCursoId, promedioFinal, resultado },
+    })
   }
 }
