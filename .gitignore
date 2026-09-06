@@ -10,3 +10,4 @@ dist/
 prisma/generated/
 .env
 *.db
+docs/

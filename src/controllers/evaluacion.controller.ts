@@ -48,6 +48,16 @@ export const createDimension = async (req: Request, res: Response): Promise<void
     return
   }
 
+  // pesoEnPromedio es Decimal(4,3) en el schema — el máximo posible es
+  // 9.999. Va como FRACCIÓN (ej. 0.45 para 45%), no como porcentaje
+  // entero (45 desborda el campo y Postgres tira un error crudo).
+  if (pesoEnPromedio !== undefined && (pesoEnPromedio < 0 || pesoEnPromedio > 9.999)) {
+    res.status(400).json({
+      error: 'pesoEnPromedio debe ser una fracción entre 0 y 9.999 (ej. 0.45 para 45%, no 45)',
+    })
+    return
+  }
+
   try {
     const existe = await prisma.dimensionEvaluacion.findUnique({
       where: { gestionId_nombre: { gestionId, nombre } },
@@ -124,6 +134,12 @@ export const createActividadEvaluativa = async (req: Request, res: Response): Pr
     res.status(400).json({
       error: 'docenteMateriaCursoId, trimestreId, dimensionId, nombre y puntajeMaximo son obligatorios',
     })
+    return
+  }
+
+  // peso también es Decimal(4,3) — máximo 9.999 (ver nota en createDimension)
+  if (peso !== undefined && (peso < 0 || peso > 9.999)) {
+    res.status(400).json({ error: 'peso debe estar entre 0 y 9.999' })
     return
   }
 
