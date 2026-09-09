@@ -136,7 +136,8 @@ export const createTutor = async (req: Request, res: Response): Promise<void> =>
 // PUT /api/tutores/:id
 export const updateTutor = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, apellido, telefono, email, ocupacion, gradoInstruccion } = req.body as {
+  const { ci, nombre, apellido, telefono, email, ocupacion, gradoInstruccion } = req.body as {
+    ci?: string
     nombre?: string
     apellido?: string
     telefono?: string
@@ -152,10 +153,20 @@ export const updateTutor = async (req: Request, res: Response): Promise<void> =>
       return
     }
 
-    if (nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
+    // ✅ CI editable — con chequeo de unicidad excluyendo al propio registro
+    if (ci !== undefined) {
+      const otraPersona = await buscarPersonaPorCi(ci)
+      if (otraPersona && otraPersona.id !== existe.personaId) {
+        res.status(409).json({ error: `Ya existe una persona registrada con el CI ${ci}` })
+        return
+      }
+    }
+
+    if (ci !== undefined || nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
       await prisma.persona.update({
         where: { id: existe.personaId },
         data: {
+          ...(ci       !== undefined && { ci }),
           ...(nombre   !== undefined && { nombre }),
           ...(apellido !== undefined && { apellido }),
           ...(telefono !== undefined && { telefono }),

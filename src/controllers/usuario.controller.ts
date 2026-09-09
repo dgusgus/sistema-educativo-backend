@@ -373,10 +373,25 @@ export const vincularPerfil = async (req: Request, res: Response): Promise<void>
     }
 
     if (docenteId && usuario.roles.includes('DOCENTE')) {
+      const existe = await prisma.docente.findUnique({ where: { id: docenteId } })
+      if (!existe) {
+        res.status(404).json({ error: `No existe un docente con id ${docenteId}` })
+        return
+      }
       await prisma.docente.update({ where: { id: docenteId }, data: { usuarioId: id } })
     } else if (estudianteId && usuario.roles.includes('ESTUDIANTE')) {
+      const existe = await prisma.estudiante.findUnique({ where: { id: estudianteId } })
+      if (!existe) {
+        res.status(404).json({ error: `No existe un estudiante con id ${estudianteId}` })
+        return
+      }
       await prisma.estudiante.update({ where: { id: estudianteId }, data: { usuarioId: id } })
     } else if (tutorId && usuario.roles.includes('TUTOR')) {
+      const existe = await prisma.tutor.findUnique({ where: { id: tutorId } })
+      if (!existe) {
+        res.status(404).json({ error: `No existe un tutor con id ${tutorId}` })
+        return
+      }
       await prisma.tutor.update({ where: { id: tutorId }, data: { usuarioId: id } })
     } else {
       res.status(400).json({

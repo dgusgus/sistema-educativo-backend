@@ -178,7 +178,8 @@ export const createDirectorConCuenta = async (req: Request, res: Response): Prom
 // ─── PUT /api/directores/:id ──────────────────────────────────────────────────
 export const updateDirector = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, apellido, telefono, email, activo } = req.body as {
+  const { ci, nombre, apellido, telefono, email, activo } = req.body as {
+    ci?: string
     nombre?: string
     apellido?: string
     telefono?: string
@@ -193,11 +194,21 @@ export const updateDirector = async (req: Request, res: Response): Promise<void>
       return
     }
 
-    // nombre/apellido/telefono/email viven en Persona, no en Director
-    if (nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
+    // ✅ CI editable — con chequeo de unicidad excluyendo al propio registro
+    if (ci !== undefined) {
+      const otraPersona = await buscarPersonaPorCi(ci)
+      if (otraPersona && otraPersona.id !== existe.personaId) {
+        res.status(409).json({ error: `Ya existe una persona registrada con el CI ${ci}` })
+        return
+      }
+    }
+
+    // nombre/apellido/telefono/email/ci viven en Persona, no en Director
+    if (ci !== undefined || nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
       await prisma.persona.update({
         where: { id: existe.personaId },
         data: {
+          ...(ci       !== undefined && { ci }),
           ...(nombre   !== undefined && { nombre }),
           ...(apellido !== undefined && { apellido }),
           ...(telefono !== undefined && { telefono }),

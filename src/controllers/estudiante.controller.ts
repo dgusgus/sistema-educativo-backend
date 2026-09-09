@@ -51,7 +51,6 @@ export const getEstudiantes = async (req: Request, res: Response): Promise<void>
             tutor: {
               select: {
                 id: true,
-                parentesco: true,
                 persona: { select: { nombre: true, apellido: true, telefono: true } },
               },
             },
@@ -181,7 +180,8 @@ export const createEstudiante = async (req: Request, res: Response): Promise<voi
 // ─── PUT /api/estudiantes/:id ─────────────────────────────────────────────────
 export const updateEstudiante = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, apellido, fechaNacimiento, direccion, activo } = req.body as {
+  const { ci, nombre, apellido, fechaNacimiento, direccion, activo } = req.body as {
+    ci?:              string
     nombre?:          string
     apellido?:        string
     fechaNacimiento?: string
@@ -196,10 +196,20 @@ export const updateEstudiante = async (req: Request, res: Response): Promise<voi
       return
     }
 
-    if (nombre !== undefined || apellido !== undefined || fechaNacimiento !== undefined || direccion !== undefined) {
+    // ✅ CI editable — con chequeo de unicidad excluyendo al propio registro
+    if (ci !== undefined) {
+      const otraPersona = await buscarPersonaPorCi(ci)
+      if (otraPersona && otraPersona.id !== existe.personaId) {
+        res.status(409).json({ error: `Ya existe una persona registrada con el CI ${ci}` })
+        return
+      }
+    }
+
+    if (ci !== undefined || nombre !== undefined || apellido !== undefined || fechaNacimiento !== undefined || direccion !== undefined) {
       await prisma.persona.update({
         where: { id: existe.personaId },
         data: {
+          ...(ci              !== undefined && { ci }),
           ...(nombre          !== undefined && { nombre }),
           ...(apellido        !== undefined && { apellido }),
           ...(fechaNacimiento !== undefined && { fechaNacimiento: new Date(fechaNacimiento) }),

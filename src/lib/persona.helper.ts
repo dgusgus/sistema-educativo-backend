@@ -83,7 +83,13 @@ export function aplanarPersona<T extends { persona?: Record<string, any> | null 
   perfil: T
 ): Omit<T, 'persona'> & Record<string, any> {
   const { persona, ...resto } = perfil as any
-  return { ...resto, ...(persona ?? {}) }
+  // ⚠️ FIX: persona va PRIMERO y resto (el perfil: docente/director/
+  // secretaria/estudiante/tutor) va DESPUÉS. Antes era al revés, y como
+  // Persona también tiene su propio "id", pisaba el id real del perfil
+  // (docente.id, etc.) con personaId — causando 404 en cualquier PUT/POST
+  // que usara ese id para operar sobre el perfil (asignar materia, editar,
+  // vincular cuenta...) en cuanto personaId y perfil.id dejaban de coincidir.
+  return { ...(persona ?? {}), ...resto }
 }
 
 // ─── Perfiles de rol ──────────────────────────────────────────────────────

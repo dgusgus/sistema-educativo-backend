@@ -126,7 +126,8 @@ export const createDocente = async (req: Request, res: Response): Promise<void> 
 // ─── PUT /api/docentes/:id ────────────────────────────────────────────────────
 export const updateDocente = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  const { nombre, apellido, especialidad, telefono, email, activo } = req.body as {
+  const { ci, nombre, apellido, especialidad, telefono, email, activo } = req.body as {
+    ci?: string
     nombre?: string
     apellido?: string
     especialidad?: string
@@ -142,14 +143,26 @@ export const updateDocente = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    if (nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
+    // ✅ CI editable — antes ni se leía del body. Como sigue siendo único
+    // a nivel de Persona, hay que chequear que no pertenezca a OTRA persona
+    // (buscarPersonaPorCi no excluye al propio registro).
+    if (ci !== undefined) {
+      const otraPersona = await buscarPersonaPorCi(ci)
+      if (otraPersona && otraPersona.id !== existe.personaId) {
+        res.status(409).json({ error: `Ya existe una persona registrada con el CI ${ci}` })
+        return
+      }
+    }
+
+    if (ci !== undefined || nombre !== undefined || apellido !== undefined || telefono !== undefined || email !== undefined) {
       await prisma.persona.update({
         where: { id: existe.personaId },
         data: {
-          ...(nombre   !== undefined && { nombre }),
-          ...(apellido !== undefined && { apellido }),
-          ...(telefono !== undefined && { telefono }),
-          ...(email    !== undefined && { email }),
+          ...(ci        !== undefined && { ci }),
+          ...(nombre    !== undefined && { nombre }),
+          ...(apellido  !== undefined && { apellido }),
+          ...(telefono  !== undefined && { telefono }),
+          ...(email     !== undefined && { email }),
         },
       })
     }
