@@ -11,6 +11,8 @@ import { Router } from 'express'
 import {
   getDimensiones,
   createDimension,
+  updateDimension,
+  deleteDimension,
   getActividadesEvaluativas,
   createActividadEvaluativa,
   desactivarActividadEvaluativa,
@@ -24,8 +26,10 @@ router.use(authMiddleware)
 
 // Dimensiones de evaluación (Ser/Saber/Hacer/Decidir) — las define
 // Dirección por gestión
-router.get('/dimensiones',  requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'), getDimensiones)
-router.post('/dimensiones', requireRol('DIRECTOR'), createDimension)
+router.get('/dimensiones',     requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'), getDimensiones)
+router.post('/dimensiones',    requireRol('DIRECTOR'), createDimension)
+router.put('/dimensiones/:id', requireRol('DIRECTOR'), updateDimension)
+router.delete('/dimensiones/:id', requireRol('DIRECTOR'), deleteDimension)
 
 // Actividades evaluativas (lo que el docente califica)
 router.get('/actividades-evaluativas',     requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'), getActividadesEvaluativas)

@@ -82,6 +82,95 @@ export const createDimension = async (req: Request, res: Response): Promise<void
   }
 }
 
+// ─── PUT /api/dimensiones/:id ──────────────────────────────────────────────────
+// Editar una dimensión ya creada — mismas validaciones que al crear.
+// No valida que pesoEnPromedio + las demás dimensiones de la gestión
+// sumen 1.0 — eso lo controla el frontend (con aviso, no bloqueo) para
+// no ser rígidos: puede haber un momento intermedio mientras se ajustan
+// varias dimensiones a la vez.
+export const updateDimension = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const { nombre, puntajeMaximo, pesoEnPromedio, orden, esAutoevaluada } = req.body as {
+    nombre?: string
+    puntajeMaximo?: number
+    pesoEnPromedio?: number
+    orden?: number
+    esAutoevaluada?: boolean
+  }
+
+  if (pesoEnPromedio !== undefined && (pesoEnPromedio < 0 || pesoEnPromedio > 9.999)) {
+    res.status(400).json({
+      error: 'pesoEnPromedio debe ser una fracción entre 0 y 9.999 (ej. 0.45 para 45%, no 45)',
+    })
+    return
+  }
+
+  try {
+    const existe = await prisma.dimensionEvaluacion.findUnique({ where: { id } })
+    if (!existe) {
+      res.status(404).json({ error: 'Dimensión no encontrada' })
+      return
+    }
+
+    if (nombre !== undefined && nombre !== existe.nombre) {
+      const duplicada = await prisma.dimensionEvaluacion.findUnique({
+        where: { gestionId_nombre: { gestionId: existe.gestionId, nombre } },
+      })
+      if (duplicada) {
+        res.status(409).json({ error: `Ya existe la dimensión "${nombre}" en esta gestión` })
+        return
+      }
+    }
+
+    const dimension = await prisma.dimensionEvaluacion.update({
+      where: { id },
+      data: {
+        ...(nombre          !== undefined && { nombre }),
+        ...(puntajeMaximo    !== undefined && { puntajeMaximo }),
+        ...(pesoEnPromedio  !== undefined && { pesoEnPromedio }),
+        ...(orden           !== undefined && { orden }),
+        ...(esAutoevaluada  !== undefined && { esAutoevaluada }),
+      },
+    })
+    res.status(200).json(dimension)
+  } catch (error) {
+    console.error('[evaluacion.updateDimension]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// ─── DELETE /api/dimensiones/:id ───────────────────────────────────────────────
+// Solo se puede borrar si NO tiene actividades evaluativas asociadas —
+// si ya hay notas cargadas sobre esta dimensión, borrarla rompería el
+// promedio ya calculado. Ahí la alternativa es dejarla en 0% y crear una
+// nueva, no eliminarla.
+export const deleteDimension = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+
+  try {
+    const existe = await prisma.dimensionEvaluacion.findUnique({ where: { id } })
+    if (!existe) {
+      res.status(404).json({ error: 'Dimensión no encontrada' })
+      return
+    }
+
+    const actividades = await prisma.actividadEvaluativa.count({ where: { dimensionId: id } })
+    if (actividades > 0) {
+      res.status(400).json({
+        error: `No se puede eliminar — la dimensión tiene ${actividades} actividad(es) evaluativa(s) registradas`,
+        sugerencia: 'Dejala en 0% en vez de eliminarla si ya se usó',
+      })
+      return
+    }
+
+    await prisma.dimensionEvaluacion.delete({ where: { id } })
+    res.status(200).json({ message: 'Dimensión eliminada correctamente' })
+  } catch (error) {
+    console.error('[evaluacion.deleteDimension]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
 // ─── GET /api/actividades-evaluativas ─────────────────────────────────────────
 // Query: docenteMateriaCursoId, trimestreId
 export const getActividadesEvaluativas = async (req: Request, res: Response): Promise<void> => {
