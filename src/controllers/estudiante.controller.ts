@@ -56,6 +56,10 @@ export const getEstudiantes = async (req: Request, res: Response): Promise<void>
             },
           },
         },
+        // ✅ faltaba — sin esto la lista nunca sabía si el estudiante ya
+        // tenía cuenta, así que "Vincular cuenta" salía siempre en el
+        // frontend aunque el estudiante ya tuviera una.
+        usuario: { select: { id: true, username: true, activo: true } },
       },
       orderBy: { persona: { apellido: 'asc' } },
     })
@@ -419,6 +423,46 @@ export const cambiarEstadoInscripcion = async (req: Request, res: Response): Pro
     res.status(200).json({ ...actualizada, estudiante: aplanarPersona(actualizada.estudiante) })
   } catch (error) {
     console.error('[estudiante.cambiarEstadoInscripcion]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// ─── DELETE /api/inscripciones/:id ────────────────────────────────────────────
+// "Desinscribir" — distinto de cambiarEstadoInscripcion(RETIRADA): esto
+// borra la inscripción de verdad, para deshacer un error (curso
+// equivocado, alta duplicada) ANTES de que tenga actividad real. Si ya
+// tiene notas, asistencia o pagos cargados, se rechaza — ahí corresponde
+// cambiar el estado a RETIRADA/TRANSFERIDA para no perder el historial.
+export const eliminarInscripcion = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+
+  try {
+    const inscripcion = await prisma.inscripcion.findUnique({ where: { id } })
+    if (!inscripcion) {
+      res.status(404).json({ error: 'Inscripción no encontrada' })
+      return
+    }
+
+    const [calificaciones, asistencias, pagos] = await Promise.all([
+      prisma.calificacion.count({ where: { inscripcionId: id } }),
+      prisma.asistencia.count({ where: { inscripcionId: id } }),
+      prisma.pago.count({ where: { inscripcionId: id } }),
+    ])
+    const totalActividad = calificaciones + asistencias + pagos
+
+    if (totalActividad > 0) {
+      res.status(400).json({
+        error: 'No se puede desinscribir — ya tiene actividad registrada (notas, asistencia o pagos)',
+        sugerencia: 'Usá "cambiar estado" a RETIRADA o TRANSFERIDA en su lugar, para conservar el historial',
+        detalle: { calificaciones, asistencias, pagos },
+      })
+      return
+    }
+
+    await prisma.inscripcion.delete({ where: { id } })
+    res.status(200).json({ message: 'Inscripción eliminada correctamente' })
+  } catch (error) {
+    console.error('[estudiante.eliminarInscripcion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
