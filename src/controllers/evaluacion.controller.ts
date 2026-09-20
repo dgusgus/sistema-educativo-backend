@@ -360,3 +360,39 @@ export const registrarNotasActividad = async (req: Request, res: Response): Prom
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+
+// ─── GET /api/actividades-evaluativas/:id/notas ──────────────────────────────
+// Devuelve las notas YA registradas de una actividad — lo que faltaba para
+// que el formulario de CalificacionesView pueda precargarlas al reabrir
+// una actividad (antes solo se sabía _count.notas, nunca los valores).
+export const getNotasActividad = async (req: Request, res: Response): Promise<void> => {
+  const actividadEvaluativaId = Number(req.params.id)
+
+  try {
+    const actividad = await prisma.actividadEvaluativa.findUnique({
+      where: { id: actividadEvaluativaId },
+      select: { docenteMateriaCurso: { select: { docenteId: true } } },
+    })
+    if (!actividad) {
+      res.status(404).json({ error: 'Actividad evaluativa no encontrada' })
+      return
+    }
+
+    if (req.user?.roles.includes('DOCENTE') && !req.user.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r))) {
+      const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user.id } })
+      if (actividad.docenteMateriaCurso.docenteId !== docente?.id) {
+        res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
+        return
+      }
+    }
+
+    const notas = await prisma.notaActividad.findMany({
+      where: { actividadEvaluativaId },
+      select: { inscripcionId: true, nota: true, observacion: true },
+    })
+    res.status(200).json(notas)
+  } catch (error) {
+    console.error('[evaluacion.getNotasActividad]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}

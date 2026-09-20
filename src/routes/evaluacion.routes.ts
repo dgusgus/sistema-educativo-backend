@@ -9,6 +9,7 @@
 
 import { Router } from 'express'
 import {
+  getNotasActividad,
   getDimensiones,
   createDimension,
   updateDimension,
@@ -38,5 +39,6 @@ router.delete('/actividades-evaluativas/:id', requireRol('DOCENTE', 'DIRECTOR'),
 
 // Notas de una actividad — dispara el recálculo del promedio
 router.post('/actividades-evaluativas/:id/notas', requireRol('DOCENTE', 'DIRECTOR'), registrarNotasActividad)
+router.get('/actividades-evaluativas/:id/notas', requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'), getNotasActividad)
 
 export default router
