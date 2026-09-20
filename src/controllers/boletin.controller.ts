@@ -13,9 +13,32 @@ import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 // ─── GET /api/boletin/:estudianteId/:trimestreId ──────────────────────────────
 export const generarBoletin = async (req: Request, res: Response): Promise<void> => {
   const estudianteId = Number(req.params.estudianteId)
-  const trimestreId  = Number(req.params.trimestreId)
+  const trimestreId = Number(req.params.trimestreId)
 
   try {
+    // ✅ RBAC de pertenencia — Director/Secretaria pasan sin filtro; una
+    // cuenta que SOLO tiene ESTUDIANTE y/o TUTOR (nunca ambas cosas con
+    // Director/Secretaria) debe demostrar que el estudianteId de la URL
+    // es el suyo propio o el de un hijo/tutorado vinculado. Sin esto,
+    // cualquier estudiante o tutor autenticado podía cambiar el número
+    // en la URL y descargar el boletín de otro estudiante cualquiera.
+    const soloFamilia = req.user!.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))
+
+    if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
+      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
+      if (!estudiante || estudiante.id !== estudianteId) {
+        res.status(403).json({ error: 'Sin permisos para ver el boletín de este estudiante' })
+        return
+      }
+    } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
+      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
+      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId } })
+      if (!vinculo) {
+        res.status(403).json({ error: 'Sin permisos para ver el boletín de este estudiante' })
+        return
+      }
+    }
+
     const trimestre = await prisma.trimestre.findUnique({
       where: { id: trimestreId },
       include: { gestion: true },
