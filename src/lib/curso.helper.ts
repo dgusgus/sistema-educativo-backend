@@ -39,3 +39,12 @@ export function siguienteNivelGrado(nivel: Nivel, grado: number): { nivel: Nivel
   // SECUNDARIA
   return grado < 6 ? { nivel: 'SECUNDARIA', grado: grado + 1 } : null
 }
+
+// 1° "A" Secundaria → "1AS"   ·   2° "B" Primaria → "2BP"
+// Mismo criterio que codigoCurso() del frontend (src/lib/abreviar.ts) —
+// si cambiás el formato en uno, cambialo en el otro para que el Excel
+// exportado por acá siga siendo válido para importar desde ahí.
+export function codigoCurso(curso: { grado: number; paralelo: string; nivel: Nivel }): string {
+  const inicialNivel = curso.nivel === 'PRIMARIA' ? 'P' : 'S'
+  return `${curso.grado}${curso.paralelo.toUpperCase()}${inicialNivel}`
+}

@@ -2,6 +2,9 @@ import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
+import { leerExcel, generarExcel } from '../lib/excel.helper.js'
+import { codigoCurso } from '../lib/curso.helper.js'   // si no existe en el backend, es el mismo que ya armamos del lado frontend — vale la pena tenerlo también acá
+import { asyncHandler } from '../lib/asyncHandler.js'
 
 // ─── GET /api/estudiantes ─────────────────────────────────────────────────────
 export const getEstudiantes = async (req: Request, res: Response): Promise<void> => {
@@ -466,3 +469,85 @@ export const eliminarInscripcion = async (req: Request, res: Response): Promise<
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+
+// ─── POST /api/estudiantes/import ──────────────────────────────────────────
+// Columnas esperadas: CI, Nombre, Apellido, FechaNacimiento, Direccion, RUDE, Curso
+// (Curso en formato corto "1AS" — mismo código que ya usa el frontend)
+export const importEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
+  if (!req.body.gestionId) { res.status(400).json({ error: 'gestionId es obligatorio' }); return }
+  const gestionId = Number(req.body.gestionId)
+
+  const filas = await leerExcel(req.file.buffer)
+  if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
+
+  const cursos = await prisma.curso.findMany({ where: { gestionId } })
+  const cursoPorCodigo = new Map(cursos.map(c => [codigoCurso(c), c]))
+
+  const resultado = { totalFilas: filas.length, exitosas: 0, fallidas: 0, creados: [] as unknown[], errores: [] as Array<{ fila: number; error: string }> }
+
+  for (const { fila, datos } of filas) {
+    try {
+      const ci        = String(datos['CI'] ?? '').trim()
+      const nombre    = String(datos['Nombre'] ?? '').trim()
+      const apellido  = String(datos['Apellido'] ?? '').trim()
+      const cursoCod  = String(datos['Curso'] ?? '').trim().toUpperCase()
+
+      if (!ci || !nombre || !apellido) throw new Error('CI, Nombre y Apellido son obligatorios')
+
+      const yaExiste = await prisma.persona.findUnique({ where: { ci } })
+      if (yaExiste) throw new Error(`Ya existe una persona con CI ${ci}`)
+
+      const curso = cursoPorCodigo.get(cursoCod)
+      if (cursoCod && !curso) throw new Error(`Curso "${cursoCod}" no encontrado en esta gestión`)
+
+      const estudiante = await prisma.$transaction(async tx => {
+        const persona = await tx.persona.create({
+          data: {
+            ci, nombre, apellido,
+            direccion: datos['Direccion'] ? String(datos['Direccion']) : undefined,
+          },
+        })
+        const est = await tx.estudiante.create({
+          data: { personaId: persona.id, rude: datos['RUDE'] ? String(datos['RUDE']) : undefined },
+        })
+        if (curso) {
+          await tx.inscripcion.create({ data: { estudianteId: est.id, cursoId: curso.id, gestionId } })
+        }
+        return est
+      })
+
+      resultado.creados.push(estudiante)
+      resultado.exitosas++
+    } catch (e) {
+      resultado.fallidas++
+      resultado.errores.push({ fila, error: e instanceof Error ? e.message : 'Error desconocido' })
+    }
+  }
+
+  res.status(200).json(resultado)
+})
+
+// ─── GET /api/estudiantes/export?gestionId= ────────────────────────────────
+export const exportEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const gestionId = Number(req.query.gestionId)
+  const inscripciones = await prisma.inscripcion.findMany({
+    where: { gestionId },
+    include: { estudiante: { include: { persona: true } }, curso: true },
+    orderBy: { estudiante: { persona: { apellido: 'asc' } } },
+  })
+
+  const filas = inscripciones.map(i => ({
+    CI: i.estudiante.persona.ci,
+    Nombre: i.estudiante.persona.nombre,
+    Apellido: i.estudiante.persona.apellido,
+    RUDE: i.estudiante.rude ?? '',
+    Curso: codigoCurso(i.curso),
+    Estado: i.estadoInscripcion,
+  }))
+
+  const buffer = await generarExcel('Estudiantes', ['CI', 'Nombre', 'Apellido', 'RUDE', 'Curso', 'Estado'], filas)
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="estudiantes_gestion_${gestionId}.xlsx"`)
+  res.send(buffer)
+})
