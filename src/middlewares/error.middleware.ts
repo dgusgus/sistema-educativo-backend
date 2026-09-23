@@ -1,13 +1,14 @@
 import type { Request, Response, NextFunction } from 'express'
-
+import multer from 'multer'
 // Middleware de error — SIEMPRE va último en app.ts, después de montar
 // todas las rutas. Reemplaza el catch repetido de cada controller.
 export function errorMiddleware(err: unknown, req: Request, res: Response, _next: NextFunction): void {
-  console.error(`[${req.method} ${req.path}]`, err)
-  if (res.headersSent) return
-  res.status(500).json({ error: 'Error interno del servidor' })
+  if (err instanceof multer.MulterError || (err instanceof Error && err.message.includes('.xlsx'))) {
+    res.status(400).json({ error: err.message })
+    return
+  }
+  // ... resto igual (ZodError, 500 genérico)
 }
-
 /* 
 // app.ts — agregar al final, después de todos los app.use('/api/...')
 import { errorMiddleware } from './middlewares/error.middleware.js'

@@ -7,15 +7,28 @@ import {
   inscribirEstudiante,
   getInscripcion,
   registrarResultado,
+  importEstudiantes,
+  exportEstudiantes,
 } from '../controllers/estudiante.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
 import { uploadExcel } from '../middlewares/upload.middleware.js'
-import { importEstudiantes, exportEstudiantes } from '../controllers/estudiante.controller.js'
 
 const router = Router()
 
 router.use(authMiddleware)
+
+router.get(
+  '/export',
+  requireRol('DIRECTOR', 'SECRETARIA'),
+  exportEstudiantes
+)
+router.post(
+  '/import',
+  requireRol('DIRECTOR', 'SECRETARIA'),
+  uploadExcel,
+  importEstudiantes
+)
 
 // Estudiantes
 router.get(

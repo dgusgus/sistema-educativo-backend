@@ -1,16 +1,21 @@
+// src/middlewares/upload.middleware.ts — reemplazo completo
 import multer from 'multer'
 
-// Archivo en memoria (no en disco) — se procesa y se descarta, no hace
-// falta persistirlo. Límite 5MB, alcanza de sobra para un Excel de
-// varios cientos de filas.
+const EXTENSIONES_VALIDAS = ['.xlsx', '.xls']
+
 export const uploadExcel = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const validos = [
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'application/vnd.ms-excel',
-    ]
-    cb(null, validos.includes(file.mimetype))
+    // ✅ Se valida por EXTENSIÓN del nombre de archivo, no por mimetype
+    // — el mimetype que reporta el navegador para .xlsx es inconsistente
+    // entre sistemas operativos (en Windows suele llegar como
+    // application/octet-stream), mientras que la extensión es confiable.
+    const extension = file.originalname.toLowerCase().slice(file.originalname.lastIndexOf('.'))
+    if (!EXTENSIONES_VALIDAS.includes(extension)) {
+      cb(new Error('El archivo debe ser .xlsx o .xls'))
+      return
+    }
+    cb(null, true)
   },
 }).single('archivo')
