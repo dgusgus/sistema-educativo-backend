@@ -7,15 +7,22 @@ import {
   asignarMateriaCurso,
   removeAsignacion,
   getMisCursos,
+  importDocentes,
+  exportDocentes,
 } from '../controllers/docente.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
+import { uploadExcel } from '../middlewares/upload.middleware.js'
+
+
 
 const router = Router()
 
 // Todos requieren autenticación
 router.use(authMiddleware)
 
+router.get('/export', requireRol('DIRECTOR'), exportDocentes)
+router.post('/import', requireRol('DIRECTOR'), uploadExcel, importDocentes)
 // Solo Director
 router.get('/', requireRol('DIRECTOR'), getDocentes)
 router.get('/mis-cursos', requireRol('DOCENTE'), getMisCursos)

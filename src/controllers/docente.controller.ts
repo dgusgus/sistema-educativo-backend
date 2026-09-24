@@ -3,6 +3,9 @@ import { prisma } from '../lib/prisma.js'
 import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
 
+import { leerExcel, generarExcel } from '../lib/excel.helper.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
+
 // ─── GET /api/docentes ────────────────────────────────────────────────────────
 export const getDocentes = async (req: Request, res: Response): Promise<void> => {
   const { activo, search } = req.query as {
@@ -354,3 +357,63 @@ export const getMisCursos = async (req: Request, res: Response): Promise<void> =
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+
+// ─── POST /api/docentes/import ─────────────────────────────────────────────
+// Columnas: CI, Nombre, Apellido, Especialidad, Email, Telefono
+// No crea cuenta de acceso (mismo criterio que createDocente) — la
+// asignación materia+curso tampoco se hace acá, es un paso aparte.
+export const importDocentes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
+  const filas = await leerExcel(req.file.buffer)
+  if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
+
+  const resultado = { totalFilas: filas.length, exitosas: 0, fallidas: 0, creados: [] as unknown[], errores: [] as Array<{ fila: number; error: string }> }
+
+  for (const { fila, datos } of filas) {
+    try {
+      const ci       = String(datos['CI'] ?? '').trim()
+      const nombre   = String(datos['Nombre'] ?? '').trim()
+      const apellido = String(datos['Apellido'] ?? '').trim()
+      if (!ci || !nombre || !apellido) throw new Error('CI, Nombre y Apellido son obligatorios')
+
+      const yaExiste = await buscarPersonaPorCi(ci)
+      if (yaExiste) throw new Error(`Ya existe una persona con CI ${ci}`)
+
+      const docente = await prisma.$transaction(async tx => {
+        const persona = await crearPersona(tx, {
+          ci, nombre, apellido,
+          email:    datos['Email']    ? String(datos['Email'])    : undefined,
+          telefono: datos['Telefono'] ? String(datos['Telefono']) : undefined,
+        })
+        return tx.docente.create({
+          data: { personaId: persona.id, especialidad: datos['Especialidad'] ? String(datos['Especialidad']) : undefined },
+        })
+      })
+
+      resultado.creados.push(docente)
+      resultado.exitosas++
+    } catch (e) {
+      resultado.fallidas++
+      resultado.errores.push({ fila, error: e instanceof Error ? e.message : 'Error desconocido' })
+    }
+  }
+
+  res.status(200).json(resultado)
+})
+
+// ─── GET /api/docentes/export ──────────────────────────────────────────────
+export const exportDocentes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const docentes = await prisma.docente.findMany({
+    include: { persona: true },
+    orderBy: { persona: { apellido: 'asc' } },
+  })
+  const filas = docentes.map(d => ({
+    CI: d.persona.ci, Nombre: d.persona.nombre, Apellido: d.persona.apellido,
+    Especialidad: d.especialidad ?? '', Email: d.persona.email ?? '', Telefono: d.persona.telefono ?? '',
+    Activo: d.activo ? 'Sí' : 'No',
+  }))
+  const buffer = await generarExcel('Docentes', ['CI', 'Nombre', 'Apellido', 'Especialidad', 'Email', 'Telefono', 'Activo'], filas)
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', 'attachment; filename="docentes.xlsx"')
+  res.send(buffer)
+})
