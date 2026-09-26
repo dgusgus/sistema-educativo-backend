@@ -9,6 +9,9 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { esDocenteDeAsignacion } from '../lib/ownership.helper.js'
+
 // GET /api/actividades
 export const getActividades = async (req: Request, res: Response): Promise<void> => {
   const { docenteMateriaCursoId, desde, hasta } = req.query as {
@@ -80,7 +83,7 @@ export const getActividadById = async (req: Request, res: Response): Promise<voi
 }
 
 // POST /api/actividades
-export const createActividad = async (req: Request, res: Response): Promise<void> => {
+export const createActividad = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const { docenteMateriaCursoId, trimestreId, fecha, tema, descripcion, tareaAsignada } = req.body as {
     docenteMateriaCursoId?: number
     trimestreId?: number
@@ -95,34 +98,23 @@ export const createActividad = async (req: Request, res: Response): Promise<void
     return
   }
 
-  try {
-    if (req.user?.roles.includes('DOCENTE') && !req.user.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r))) {
-      const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user.id } })
-      const asig = await prisma.docenteMateriaCurso.findFirst({
-        where: { id: docenteMateriaCursoId, docenteId: docente?.id },
-      })
-      if (!asig) {
-        res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
-        return
-      }
-    }
-
-    const bitacora = await prisma.bitacoraClase.create({
-      data: {
-        docenteMateriaCursoId,
-        trimestreId,
-        fecha: fecha ? new Date(fecha) : new Date(),
-        tema,
-        descripcion,
-        tareaAsignada,
-      },
-    })
-    res.status(201).json(bitacora)
-  } catch (error) {
-    console.error('[actividad.createActividad]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  if (!await esDocenteDeAsignacion(req, docenteMateriaCursoId)) {
+    res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
+    return
   }
-}
+
+  const bitacora = await prisma.bitacoraClase.create({
+    data: {
+      docenteMateriaCursoId,
+      trimestreId,
+      fecha: fecha ? new Date(fecha) : new Date(),
+      tema,
+      descripcion,
+      tareaAsignada,
+    },
+  })
+  res.status(201).json(bitacora)
+})
 
 // PUT /api/actividades/:id
 export const updateActividad = async (req: Request, res: Response): Promise<void> => {

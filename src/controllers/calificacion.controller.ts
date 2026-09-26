@@ -2,10 +2,13 @@ import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { esDocenteDeAsignacion } from '../lib/ownership.helper.js'
+
 // ─── GET /api/calificaciones ──────────────────────────────────────────────────
 // Planilla del docente: promedio ya calculado (ver evaluacion.controller.ts
 // y calificacion.helper.ts para cómo se arma), con el desglose por dimensión.
-export const getCalificaciones = async (req: Request, res: Response): Promise<void> => {
+export const getCalificaciones = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const { docenteMateriaCursoId, trimestreId } = req.query as {
     docenteMateriaCursoId?: string
     trimestreId?: string
@@ -16,75 +19,70 @@ export const getCalificaciones = async (req: Request, res: Response): Promise<vo
     return
   }
 
-  try {
-    const dmcId  = Number(docenteMateriaCursoId)
-    const trimId = Number(trimestreId)
-
-    if (req.user?.roles.includes('DOCENTE') && !req.user.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r))) {
-      const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user.id } })
-      const asignacion = await prisma.docenteMateriaCurso.findFirst({ where: { id: dmcId, docenteId: docente?.id } })
-      if (!asignacion) {
-        res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
-        return
-      }
-    }
-
-    const dmc = await prisma.docenteMateriaCurso.findUnique({
-      where: { id: dmcId },
-      include: {
-        materia: { select: { id: true, nombre: true } },
-        curso:   { select: { id: true, nivel: true, grado: true, paralelo: true } },
-        gestion: { select: { id: true, anio: true } },
-      },
-    })
-    if (!dmc) {
-      res.status(404).json({ error: 'Asignación no encontrada' })
-      return
-    }
-
-    const trimestre = await prisma.trimestre.findUnique({ where: { id: trimId } })
-    if (!trimestre) {
-      res.status(404).json({ error: 'Trimestre no encontrado' })
-      return
-    }
-
-    const inscripciones = await prisma.inscripcion.findMany({
-      where: { cursoId: dmc.cursoId, gestionId: dmc.gestionId },
-      include: {
-        estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } },
-        calificaciones: {
-          where: { docenteMateriaCursoId: dmcId, trimestreId: trimId },
-          include: { dimensiones: { include: { dimension: { select: { nombre: true } } } } },
-        },
-      },
-      orderBy: { estudiante: { persona: { apellido: 'asc' } } },
-    })
-
-    const planilla = inscripciones.map(insc => {
-      const cal = insc.calificaciones[0]
-      return {
-        inscripcionId:  insc.id,
-        estudiante:     { id: insc.estudiante.id, ...insc.estudiante.persona },
-        calificacionId: cal?.id ?? null,
-        promedio:       cal?.promedioTrimestral ?? null,
-        dimensiones:    cal?.dimensiones.map(d => ({ nombre: d.dimension.nombre, promedio: d.promedio })) ?? [],
-        registrado:     cal?.promedioTrimestral != null,
-      }
-    })
-
-    res.status(200).json({
-      dmc,
-      trimestre,
-      trimestreCerrado: trimestre.cerrado,
-      totalEstudiantes: planilla.length,
-      notasRegistradas: planilla.filter(p => p.registrado).length,
-      planilla,
-    })
-  } catch (error) {
-    console.error('[calificacion.getCalificaciones]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  const dmcId  = Number(docenteMateriaCursoId)
+  const trimId = Number(trimestreId)
+  if (!Number.isInteger(dmcId) || !Number.isInteger(trimId)) {
+    res.status(400).json({ error: 'docenteMateriaCursoId y trimestreId deben ser números' })
+    return
   }
-}
+
+  if (!await esDocenteDeAsignacion(req, dmcId)) {
+    res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
+    return
+  }
+
+  const dmc = await prisma.docenteMateriaCurso.findUnique({
+    where: { id: dmcId },
+    include: {
+      materia: { select: { id: true, nombre: true } },
+      curso:   { select: { id: true, nivel: true, grado: true, paralelo: true } },
+      gestion: { select: { id: true, anio: true } },
+    },
+  })
+  if (!dmc) {
+    res.status(404).json({ error: 'Asignación no encontrada' })
+    return
+  }
+
+  const trimestre = await prisma.trimestre.findUnique({ where: { id: trimId } })
+  if (!trimestre) {
+    res.status(404).json({ error: 'Trimestre no encontrado' })
+    return
+  }
+
+  const inscripciones = await prisma.inscripcion.findMany({
+    where: { cursoId: dmc.cursoId, gestionId: dmc.gestionId },
+    include: {
+      estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } },
+      calificaciones: {
+        where: { docenteMateriaCursoId: dmcId, trimestreId: trimId },
+        include: { dimensiones: { include: { dimension: { select: { nombre: true } } } } },
+      },
+    },
+    orderBy: { estudiante: { persona: { apellido: 'asc' } } },
+  })
+
+  const planilla = inscripciones.map(insc => {
+    const cal = insc.calificaciones[0]
+    return {
+      inscripcionId:  insc.id,
+      estudiante:     { id: insc.estudiante.id, ...insc.estudiante.persona },
+      calificacionId: cal?.id ?? null,
+      promedio:       cal?.promedioTrimestral ?? null,
+      dimensiones:    cal?.dimensiones.map(d => ({ nombre: d.dimension.nombre, promedio: d.promedio })) ?? [],
+      registrado:     cal?.promedioTrimestral != null,
+    }
+  })
+
+  res.status(200).json({
+    dmc,
+    trimestre,
+    trimestreCerrado: trimestre.cerrado,
+    totalEstudiantes: planilla.length,
+    notasRegistradas: planilla.filter(p => p.registrado).length,
+    planilla,
+  })
+})
 
 // ─── PUT /api/calificaciones/:id ──────────────────────────────────────────────
 // Corrección MANUAL de un promedio ya calculado. Solo tiene sentido con
