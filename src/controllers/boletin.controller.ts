@@ -3,6 +3,12 @@ import { prisma } from '../lib/prisma.js'
 import { crearDocumento, dibujarEncabezado, dibujarPiePagina, COLORES } from '../lib/pdf.js'
 import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 
+
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { esDocenteDelCurso } from '../lib/ownership.helper.js'
+import { generarBoletinGeneral } from '../services/boletin.service.js'
+import { obtenerMejoresEstudiantes as calcularMejoresEstudiantes } from '../services/boletin.service.js'
+
 // NOTA: el boletín muestra Calificacion.promedioTrimestral (el promedio
 // ya ponderado por dimensiones — ver calificacion.helper.ts). No
 // desglosa Ser/Saber/Hacer/Decidir por materia en esta versión; si se
@@ -390,6 +396,235 @@ export const generarBoletinesCurso = async (req: Request, res: Response): Promis
     console.error('[boletin.generarBoletinesCurso]', error)
     if (!res.headersSent) {
       res.status(500).json({ error: 'Error al generar los boletines' })
+    }
+  }
+}
+
+
+
+// GET /api/boletin/general/:cursoId
+// Boletín General del curso completo en JSON (todas las materias, todos
+// los trimestres, todos los estudiantes activos) — para pintar la tabla
+// en pantalla ANTES de generar el PDF masivo. Mismo criterio de acceso
+// que el resto de endpoints de curso: admin o docente con asignación ahí.
+export const obtenerBoletinGeneral = asyncHandler(async (req, res) => {
+  const cursoId = Number(req.params.cursoId)
+  if (!Number.isInteger(cursoId)) {
+    res.status(400).json({ error: 'cursoId inválido' })
+    return
+  }
+ 
+  const curso = await prisma.curso.findUnique({ where: { id: cursoId }, select: { gestionId: true } })
+  if (!curso) {
+    res.status(404).json({ error: 'El curso no existe' })
+    return
+  }
+ 
+  if (!(await esDocenteDelCurso(req, cursoId, curso.gestionId))) {
+    res.status(403).json({ error: 'Sin acceso a este curso' })
+    return
+  }
+ 
+  const boletin = await generarBoletinGeneral(cursoId)
+  res.json(boletin)
+})
+
+
+
+// GET /api/boletin/mejores/:cursoId?limite=3
+// Ranking de mejores estudiantes del curso — uno por trimestre + uno
+// anual. Mismo criterio de acceso que /boletin/general/:cursoId.
+export const obtenerMejoresEstudiantes = asyncHandler(async (req, res) => {
+  const cursoId = Number(req.params.cursoId)
+  if (!Number.isInteger(cursoId)) {
+    res.status(400).json({ error: 'cursoId inválido' })
+    return
+  }
+  const limite = req.query.limite ? Number(req.query.limite) : 3
+  if (!Number.isInteger(limite) || limite < 1) {
+    res.status(400).json({ error: 'limite debe ser un entero positivo' })
+    return
+  }
+ 
+  const curso = await prisma.curso.findUnique({ where: { id: cursoId }, select: { gestionId: true } })
+  if (!curso) {
+    res.status(404).json({ error: 'El curso no existe' })
+    return
+  }
+  if (!(await esDocenteDelCurso(req, cursoId, curso.gestionId))) {
+    res.status(403).json({ error: 'Sin acceso a este curso' })
+    return
+  }
+ 
+  const ranking = await calcularMejoresEstudiantes(cursoId, limite)
+  res.json(ranking)
+})
+ 
+// GET /api/boletin/libreta/:estudianteId/:gestionId
+// Libreta ANUAL: todas las materias x todos los trimestres + promedio
+// general del año, en un único PDF — el "registro permanente", a
+// diferencia de generarBoletin() (arriba) que es solo un trimestre.
+// Reutiliza generarBoletinGeneral() y extrae la fila del estudiante
+// pedido, así que sale con los mismos números que ve Secretaría en
+// pantalla — nunca puede desincronizarse con esa tabla.
+export const generarLibreta = async (req: Request, res: Response): Promise<void> => {
+  const estudianteId = Number(req.params.estudianteId)
+  const gestionId = Number(req.params.gestionId)
+ 
+  try {
+    // Mismo chequeo de pertenencia que generarBoletin() de arriba.
+    const soloFamilia = req.user!.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))
+    if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
+      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
+      if (!estudiante || estudiante.id !== estudianteId) {
+        res.status(403).json({ error: 'Sin permisos para ver la libreta de este estudiante' })
+        return
+      }
+    } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
+      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
+      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId } })
+      if (!vinculo) {
+        res.status(403).json({ error: 'Sin permisos para ver la libreta de este estudiante' })
+        return
+      }
+    }
+ 
+    const inscripcion = await prisma.inscripcion.findFirst({
+      where: { estudianteId, gestionId },
+      include: { estudiante: { include: { persona: true } }, curso: true, gestion: true },
+    })
+    if (!inscripcion) {
+      res.status(404).json({ error: 'El estudiante no está inscrito en esta gestión' })
+      return
+    }
+ 
+    const boletin = await generarBoletinGeneral(inscripcion.cursoId)
+    const fila = boletin.estudiantes.find(e => e.inscripcionId === inscripcion.id)
+    if (!fila) {
+      res.status(404).json({ error: 'No se encontraron notas para este estudiante en esta gestión' })
+      return
+    }
+ 
+    const tutorVinculo = await prisma.tutorEstudiante.findFirst({
+      where: { estudianteId },
+      include: { tutor: { select: { persona: { select: { nombre: true, apellido: true } } } } },
+    })
+    const notaMinima = Number(inscripcion.gestion.notaMinimaAprobacion)
+ 
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="libreta_${inscripcion.estudiante.persona.apellido}_${boletin.curso.anioGestion}.pdf"`
+    )
+ 
+    const doc = crearDocumento()
+    doc.pipe(res)
+    dibujarEncabezado(doc)
+ 
+    doc.fillColor(COLORES.azulOscuro).fontSize(13).font('Helvetica-Bold')
+       .text(`LIBRETA DE CALIFICACIONES — GESTIÓN ${boletin.curso.anioGestion}`, { align: 'center' })
+       .moveDown(0.5)
+ 
+    const yDatos = doc.y
+    doc.rect(50, yDatos, doc.page.width - 100, 66).fill(COLORES.azulClaro)
+    doc.fillColor(COLORES.azulOscuro).fontSize(9).font('Helvetica-Bold').text('DATOS DEL ESTUDIANTE', 60, yDatos + 8)
+    doc.fillColor(COLORES.grisOscuro).fontSize(9).font('Helvetica')
+ 
+    const nombreCursoTexto = `${NIVEL_TEXTO[boletin.curso.nivel as keyof typeof NIVEL_TEXTO]} ${boletin.curso.grado}° "${boletin.curso.paralelo}"`
+    doc.text('Nombre:', 60, yDatos + 22, { continued: true }).font('Helvetica-Bold')
+       .text(` ${inscripcion.estudiante.persona.nombre} ${inscripcion.estudiante.persona.apellido}`)
+    doc.font('Helvetica').text('RUDE:', 60, yDatos + 36, { continued: true }).font('Helvetica-Bold')
+       .text(` ${inscripcion.estudiante.rude ?? '—'}`)
+    doc.font('Helvetica').text('Curso:', 320, yDatos + 22, { continued: true }).font('Helvetica-Bold')
+       .text(` ${nombreCursoTexto}`)
+    doc.font('Helvetica').text('Tutor/Padre:', 320, yDatos + 36, { continued: true }).font('Helvetica-Bold')
+       .text(` ${tutorVinculo ? `${tutorVinculo.tutor.persona.nombre} ${tutorVinculo.tutor.persona.apellido}` : 'No registrado'}`)
+ 
+    doc.y = yDatos + 76
+    doc.moveDown(0.3)
+ 
+    // Tabla: Materia | T1 | T2 | T3 (dinámico) | Anual | Resultado —
+    // agrupada por Campo de Saber, igual que la tabla en pantalla.
+    const yT = doc.y
+    const anchoTrim = 45
+    const COL = {
+      materia:   { x: 52, ancho: 190 },
+      t:         boletin.trimestres.map((_, i) => ({ x: 244 + i * anchoTrim, ancho: anchoTrim })),
+      anual:     { x: 244 + boletin.trimestres.length * anchoTrim,      ancho: 55 },
+      resultado: { x: 244 + boletin.trimestres.length * anchoTrim + 55, ancho: 90 },
+    }
+ 
+    doc.rect(50, yT, doc.page.width - 100, 20).fill(COLORES.azulOscuro)
+    doc.fillColor(COLORES.blanco).fontSize(8).font('Helvetica-Bold')
+       .text('MATERIA', COL.materia.x, yT + 6, { width: COL.materia.ancho, lineBreak: false })
+    boletin.trimestres.forEach((t, i) => {
+      doc.text(`T${t.numero}`, COL.t[i].x, yT + 6, { width: COL.t[i].ancho, align: 'center', lineBreak: false })
+    })
+    doc.text('ANUAL',     COL.anual.x,     yT + 6, { width: COL.anual.ancho,     align: 'center', lineBreak: false })
+    doc.text('RESULTADO', COL.resultado.x, yT + 6, { width: COL.resultado.ancho, align: 'center', lineBreak: false })
+ 
+    let yFila = yT + 20
+    let campoActual = ''
+    fila.materias.forEach((m, idx) => {
+      const materiaMeta = boletin.materias[idx]
+ 
+      if (materiaMeta.campoSaber && materiaMeta.campoSaber !== campoActual) {
+        campoActual = materiaMeta.campoSaber
+        doc.rect(50, yFila, doc.page.width - 100, 14).fill(COLORES.azulMedio)
+        doc.fillColor(COLORES.blanco).fontSize(7).font('Helvetica-Bold')
+           .text(campoActual.toUpperCase(), 54, yFila + 3, { lineBreak: false })
+        yFila += 14
+      }
+ 
+      const fondo = idx % 2 === 0 ? COLORES.grisClaro : COLORES.blanco
+      doc.rect(50, yFila, doc.page.width - 100, 18).fill(fondo)
+      doc.fillColor(COLORES.grisOscuro).fontSize(8).font('Helvetica')
+         .text(materiaMeta.nombre, COL.materia.x, yFila + 4, { width: COL.materia.ancho, lineBreak: false })
+ 
+      boletin.trimestres.forEach((t, i) => {
+        const nota = m.notasPorTrimestre[t.id]
+        doc.text(nota !== null ? nota.toFixed(0) : '—', COL.t[i].x, yFila + 4, { width: COL.t[i].ancho, align: 'center', lineBreak: false })
+      })
+ 
+      doc.font('Helvetica-Bold')
+         .text(m.promedioAnual !== null ? m.promedioAnual.toFixed(0) : '—', COL.anual.x, yFila + 4, { width: COL.anual.ancho, align: 'center', lineBreak: false })
+ 
+      const colorResultado = m.resultado === 'REPROBADO' ? COLORES.rojo : m.resultado === 'PROMOVIDO' ? COLORES.verde : COLORES.grisMedio
+      doc.fillColor(colorResultado).font('Helvetica-Bold')
+         .text(m.resultado, COL.resultado.x, yFila + 4, { width: COL.resultado.ancho, align: 'center', lineBreak: false })
+ 
+      yFila += 18
+    })
+ 
+    doc.rect(50, yFila, doc.page.width - 100, 24).fill(COLORES.azulOscuro)
+    doc.fillColor(COLORES.blanco).fontSize(10).font('Helvetica-Bold')
+       .text('PROMEDIO GENERAL', 52, yFila + 6, { width: 340 })
+       .text(fila.promedioGeneralAnual !== null ? fila.promedioGeneralAnual.toFixed(2) : '—', COL.anual.x, yFila + 6, { width: COL.anual.ancho, align: 'center' })
+       .text(
+         fila.promedioGeneralAnual !== null ? (fila.promedioGeneralAnual >= notaMinima ? 'PROMOVIDO' : 'REPROBADO') : 'PENDIENTE',
+         COL.resultado.x, yFila + 6, { width: COL.resultado.ancho, align: 'center' }
+       )
+ 
+    doc.y = yFila + 34
+    doc.moveDown(2)
+ 
+    const yFirmas = doc.y
+    const firmas = [
+      { label: 'Director/a', x: 60 },
+      { label: 'Secretario/a', x: 240 },
+      { label: 'Tutor/Padre de Familia', x: 420 },
+    ]
+    firmas.forEach(f => {
+      doc.moveTo(f.x, yFirmas + 30).lineTo(f.x + 140, yFirmas + 30).strokeColor(COLORES.grisOscuro).lineWidth(0.5).stroke()
+      doc.fillColor(COLORES.grisMedio).fontSize(8).font('Helvetica').text(f.label, f.x, yFirmas + 35, { width: 140, align: 'center' })
+    })
+ 
+    dibujarPiePagina(doc, 1)
+    doc.end()
+  } catch (error) {
+    console.error('[boletin.generarLibreta]', error)
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Error al generar la libreta' })
     }
   }
 }
