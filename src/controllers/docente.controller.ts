@@ -51,6 +51,10 @@ export const getDocentes = async (req: Request, res: Response): Promise<void> =>
 // ─── GET /api/docentes/:id ────────────────────────────────────────────────────
 export const getDocenteById = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
 
   try {
     const docente = await prisma.docente.findUnique({
@@ -129,6 +133,10 @@ export const createDocente = async (req: Request, res: Response): Promise<void> 
 // ─── PUT /api/docentes/:id ────────────────────────────────────────────────────
 export const updateDocente = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
   const { ci, nombre, apellido, especialidad, telefono, email, activo } = req.body as {
     ci?: string
     nombre?: string

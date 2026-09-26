@@ -63,6 +63,10 @@ export const getTutores = async (req: Request, res: Response): Promise<void> => 
 // GET /api/tutores/:id
 export const getTutorById = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
   try {
     const tutor = await prisma.tutor.findUnique({
       where: { id },
@@ -149,6 +153,10 @@ export const createTutor = async (req: Request, res: Response): Promise<void> =>
 // PUT /api/tutores/:id
 export const updateTutor = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
   const { ci, nombre, apellido, telefono, email, ocupacion, gradoInstruccion } = req.body as {
     ci?: string
     nombre?: string

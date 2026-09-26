@@ -27,6 +27,7 @@ import directorRoutes   from './routes/director.routes.js'
 import secretariaRoutes from './routes/secretaria.routes.js'
 import institucionRoutes from './routes/institucion.routes.js'
 import horarioRoutes from './routes/horario.routes.js'
+import { errorMiddleware } from './middlewares/error.middleware.js'
 
 const app: Express = express()
 
@@ -108,4 +109,8 @@ app.use('/api',               reporteRoutes)
 // Institución
 app.use('/api/institucion', institucionRoutes)
 app.use('/api/horarios', horarioRoutes)
+
+// Middleware de error — siempre último, captura asyncHandler/multer
+app.use(errorMiddleware)
+
 export default app

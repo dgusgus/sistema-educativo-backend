@@ -83,6 +83,10 @@ export const getEstudiantes = async (req: Request, res: Response): Promise<void>
 // ─── GET /api/estudiantes/:id ─────────────────────────────────────────────────
 export const getEstudianteById = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
 
   // Control RBAC: si el usuario SOLO tiene roles de familia (estudiante
   // y/o tutor, sin ningún rol de staff), solo puede ver su propia info.
@@ -187,6 +191,10 @@ export const createEstudiante = async (req: Request, res: Response): Promise<voi
 // ─── PUT /api/estudiantes/:id ─────────────────────────────────────────────────
 export const updateEstudiante = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
   const { ci, nombre, apellido, fechaNacimiento, direccion, activo } = req.body as {
     ci?:              string
     nombre?:          string
@@ -477,6 +485,7 @@ export const importEstudiantes = asyncHandler(async (req: Request, res: Response
   if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
   if (!req.body.gestionId) { res.status(400).json({ error: 'gestionId es obligatorio' }); return }
   const gestionId = Number(req.body.gestionId)
+  if (!Number.isInteger(gestionId)) { res.status(400).json({ error: 'gestionId debe ser un número' }); return }
 
   const filas = await leerExcel(req.file.buffer, req.file.originalname)
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
@@ -531,6 +540,10 @@ export const importEstudiantes = asyncHandler(async (req: Request, res: Response
 // ─── GET /api/estudiantes/export?gestionId= ────────────────────────────────
 export const exportEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const gestionId = Number(req.query.gestionId)
+  if (!Number.isInteger(gestionId)) {
+    res.status(400).json({ error: 'gestionId es obligatorio y debe ser un número' })
+    return
+  }
   const inscripciones = await prisma.inscripcion.findMany({
     where: { gestionId },
     include: { estudiante: { include: { persona: true } }, curso: true },
