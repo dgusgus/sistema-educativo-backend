@@ -15,12 +15,30 @@ export function esAdmin(req: Request): boolean {
 }
 
 // Docente: ¿esta asignación (DocenteMateriaCurso) es suya?
+// Si el usuario tiene rol DOCENTE pero no tiene perfil creado, se
+// niega el acceso — sin este chequeo, `docenteId: undefined` sería
+// ignorado por Prisma y matchearía CUALQUIER asignación con ese id.
 export async function esDocenteDeAsignacion(req: Request, docenteMateriaCursoId: number): Promise<boolean> {
   if (esAdmin(req)) return true
   if (!req.user!.roles.includes('DOCENTE')) return false
   const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user!.id } })
+  if (!docente) return false
   const asignacion = await prisma.docenteMateriaCurso.findFirst({
-    where: { id: docenteMateriaCursoId, docenteId: docente?.id },
+    where: { id: docenteMateriaCursoId, docenteId: docente.id },
+  })
+  return !!asignacion
+}
+
+// Docente: ¿tiene al menos una asignación en este curso+gestión?
+// Se usa cuando el endpoint recibe un inscripcionId/cursoId en vez de
+// un docenteMateriaCursoId directo (ej. getResumen de asistencia).
+export async function esDocenteDelCurso(req: Request, cursoId: number, gestionId: number): Promise<boolean> {
+  if (esAdmin(req)) return true
+  if (!req.user!.roles.includes('DOCENTE')) return false
+  const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user!.id } })
+  if (!docente) return false
+  const asignacion = await prisma.docenteMateriaCurso.findFirst({
+    where: { docenteId: docente.id, cursoId, gestionId },
   })
   return !!asignacion
 }
@@ -34,7 +52,8 @@ export async function esFamiliaDeEstudiante(req: Request, estudianteId: number):
   }
   if (req.user!.roles.includes('TUTOR')) {
     const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-    const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId } })
+    if (!tutor) return false
+    const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor.id, estudianteId } })
     return !!vinculo
   }
   return false
