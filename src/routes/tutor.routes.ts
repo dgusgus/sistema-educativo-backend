@@ -13,8 +13,10 @@ import { uploadExcel }    from '../middlewares/upload.middleware.js'
 const router = Router()
 router.use(authMiddleware)
 
-// ⚠️ específicas ANTES de /:id
+// ⚠️ específicas ANTES de /:id — Express matchea en orden, si /plantilla
+// va después la captura getTutorById como id="plantilla" (NaN → 500)
 router.get('/export',  requireRol('DIRECTOR', 'SECRETARIA'), exportTutores)
+router.get('/plantilla', requireRol('DIRECTOR', 'SECRETARIA'), plantillaTutores)
 router.post('/import', requireRol('DIRECTOR', 'SECRETARIA'), uploadExcel, importTutores)
 
 router.get('/',    requireRol('DIRECTOR', 'SECRETARIA'), getTutores)
@@ -23,5 +25,4 @@ router.post('/',   requireRol('SECRETARIA', 'DIRECTOR'), createTutor)
 router.put('/:id', requireRol('SECRETARIA', 'DIRECTOR'), updateTutor)
 router.post('/:id/vincular/:estudianteId',  requireRol('SECRETARIA', 'DIRECTOR'), vincularEstudiante)
 router.delete('/:id/vincular/:estudianteId', requireRol('SECRETARIA', 'DIRECTOR'), desvincularEstudiante)
-router.get('/plantilla', requireRol('DIRECTOR', 'SECRETARIA'), plantillaTutores)
 export default router

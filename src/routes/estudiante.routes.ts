@@ -19,11 +19,15 @@ const router = Router()
 
 router.use(authMiddleware)
 
+// ⚠️ específicas ANTES de /:id — Express matchea en orden, si /plantilla,
+// /export o /import van después las captura getEstudianteById como
+// id="plantilla" (NaN → Prisma 500)
 router.get(
   '/export',
   requireRol('DIRECTOR', 'SECRETARIA'),
   exportEstudiantes
 )
+router.get('/plantilla', requireRol('DIRECTOR', 'SECRETARIA'), plantillaEstudiantes)
 router.post(
   '/import',
   requireRol('DIRECTOR', 'SECRETARIA'),
@@ -52,19 +56,5 @@ router.put(
   requireRol('SECRETARIA', 'DIRECTOR'),
   updateEstudiante
 )
-router.post(
-  '/import',
-  requireRol('SECRETARIA', 'DIRECTOR'),
-  uploadExcel, importEstudiantes
-)
-router.get(
-  '/export', 
-  requireRol('SECRETARIA', 'DIRECTOR'), 
-  exportEstudiantes
-)
-
-// estudiante.routes.ts
-router.get('/plantilla', requireRol('DIRECTOR', 'SECRETARIA'), plantillaEstudiantes)
-
 
 export default router
