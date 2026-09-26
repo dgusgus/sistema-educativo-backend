@@ -3,6 +3,10 @@ import bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
+
+const MAX_INTENTOS_FALLIDOS = 5
+const MINUTOS_BLOQUEO       = 15
 
 // Selecciona los 5 perfiles posibles con su Persona — un usuario puede
 // tener más de uno (roles: Rol[]), por eso ya no alcanza con un switch
@@ -26,69 +30,91 @@ function primerPerfil(usuario: {
 }
 
 // ─── POST /api/auth/login ─────────────────────────────────────────────────────
-export const login = async (req: Request, res: Response): Promise<void> => {
-  const { username, password } = req.body as {
-    username?: string
-    password?: string
-  }
+export const login = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { username, password } = req.body as { username?: string; password?: string }
 
   if (!username || !password) {
     res.status(400).json({ error: 'Usuario y contraseña son obligatorios' })
     return
   }
 
-  try {
-    const usuario = await prisma.usuario.findUnique({
-      where: { username },
-      include: perfilesInclude,
-    })
+  const usuario = await prisma.usuario.findUnique({
+    where: { username },
+    include: perfilesInclude,
+  })
 
-    if (!usuario) {
-      res.status(401).json({ error: 'Credenciales incorrectas' })
-      return
-    }
-
-    if (!usuario.activo) {
-      res.status(401).json({ error: 'Cuenta desactivada. Contacte al administrador.' })
-      return
-    }
-
-    const passwordValida = await bcrypt.compare(password, usuario.passwordHash)
-    if (!passwordValida) {
-      res.status(401).json({ error: 'Credenciales incorrectas' })
-      return
-    }
-
-    const perfil = primerPerfil(usuario)
-    const nombre = perfil
-      ? `${perfil.persona.nombre} ${perfil.persona.apellido}`
-      : usuario.username
-
-    const token = jwt.sign(
-      {
-        id:       usuario.id,
-        roles:    usuario.roles,
-        username: usuario.username,
-        nombre,
-      },
-      process.env.JWT_SECRET ?? 'secret',
-      { expiresIn: (process.env.JWT_EXPIRES_IN ?? '8h') as SignOptions['expiresIn'] }
-    )
-
-    res.status(200).json({
-      token,
-      usuario: {
-        id:       usuario.id,
-        username: usuario.username,
-        roles:    usuario.roles,     // ← antes "rol" (uno solo)
-        nombre,                      // ← el frontend lo usa en el sidebar
-      },
-    })
-  } catch (error) {
-    console.error('[auth.login]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  // Mismo mensaje genérico que si la contraseña fuera incorrecta — no
+  // hay que revelar si el username existe o no.
+  if (!usuario) {
+    res.status(401).json({ error: 'Credenciales incorrectas' })
+    return
   }
-}
+
+  // ✅ Cuenta bloqueada por intentos fallidos — se corta ANTES de
+  // verificar la contraseña, para no gastar el costo de bcrypt en una
+  // cuenta que ya sabemos que no va a pasar.
+  if (usuario.bloqueadoHasta && usuario.bloqueadoHasta > new Date()) {
+    const minutosRestantes = Math.ceil((usuario.bloqueadoHasta.getTime() - Date.now()) / 60_000)
+    res.status(423).json({
+      error: `Cuenta bloqueada temporalmente por intentos fallidos. Intentá de nuevo en ${minutosRestantes} minuto(s).`,
+    })
+    return
+  }
+
+  if (!usuario.activo) {
+    res.status(401).json({ error: 'Cuenta desactivada. Contacte al administrador.' })
+    return
+  }
+
+  const passwordValida = await bcrypt.compare(password, usuario.passwordHash)
+
+  if (!passwordValida) {
+    const intentos = usuario.intentosFallidos + 1
+    const seBloquea = intentos >= MAX_INTENTOS_FALLIDOS
+
+    await prisma.usuario.update({
+      where: { id: usuario.id },
+      data: {
+        intentosFallidos: seBloquea ? 0 : intentos,   // se reinicia el contador al bloquear — el próximo ciclo empieza limpio
+        bloqueadoHasta:    seBloquea ? new Date(Date.now() + MINUTOS_BLOQUEO * 60_000) : null,
+      },
+    })
+
+    if (seBloquea) {
+      res.status(423).json({
+        error: `Demasiados intentos fallidos. Cuenta bloqueada por ${MINUTOS_BLOQUEO} minutos.`,
+      })
+      return
+    }
+
+    res.status(401).json({
+      error: 'Credenciales incorrectas',
+      intentosRestantes: MAX_INTENTOS_FALLIDOS - intentos,
+    })
+    return
+  }
+
+  // ✅ Login correcto — limpiar cualquier rastro de intentos previos y
+  // registrar el acceso.
+  await prisma.usuario.update({
+    where: { id: usuario.id },
+    data: { intentosFallidos: 0, bloqueadoHasta: null, ultimoAcceso: new Date() },
+  })
+
+  const perfil = primerPerfil(usuario)
+  const nombre = perfil ? `${perfil.persona.nombre} ${perfil.persona.apellido}` : usuario.username
+
+  const token = jwt.sign(
+    { id: usuario.id, roles: usuario.roles, username: usuario.username, nombre },
+    process.env.JWT_SECRET ?? 'secret',
+    { expiresIn: (process.env.JWT_EXPIRES_IN ?? '8h') as SignOptions['expiresIn'] }
+  )
+
+  res.status(200).json({
+    token,
+    usuario: { id: usuario.id, username: usuario.username, roles: usuario.roles, nombre },
+  })
+})
 
 // ─── GET /api/auth/me ─────────────────────────────────────────────────────────
 // Retorna los datos del usuario autenticado (requiere token)

@@ -364,7 +364,7 @@ export const getMisCursos = async (req: Request, res: Response): Promise<void> =
 // asignación materia+curso tampoco se hace acá, es un paso aparte.
 export const importDocentes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
-  const filas = await leerExcel(req.file.buffer)
+  const filas = await leerExcel(req.file.buffer, req.file.originalname)
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
 
   const resultado = { totalFilas: filas.length, exitosas: 0, fallidas: 0, creados: [] as unknown[], errores: [] as Array<{ fila: number; error: string }> }
@@ -415,5 +415,14 @@ export const exportDocentes = asyncHandler(async (req: Request, res: Response): 
   const buffer = await generarExcel('Docentes', ['CI', 'Nombre', 'Apellido', 'Especialidad', 'Email', 'Telefono', 'Activo'], filas)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', 'attachment; filename="docentes.xlsx"')
+  res.send(buffer)
+})
+
+export const plantillaDocentes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const columnas = ['CI', 'Nombre', 'Apellido', 'Especialidad', 'Email', 'Telefono']
+  const ejemplo  = { CI: '3456789', Nombre: 'Carlos', Apellido: 'Flores Huanca', Especialidad: 'Inglés y Ed. Física', Email: 'cflores@correo.com', Telefono: '70123456' }
+  const buffer = await generarExcel('Plantilla', columnas, [ejemplo])
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', 'attachment; filename="plantilla_docentes.xlsx"')
   res.send(buffer)
 })

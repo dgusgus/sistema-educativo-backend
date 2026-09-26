@@ -478,7 +478,7 @@ export const importEstudiantes = asyncHandler(async (req: Request, res: Response
   if (!req.body.gestionId) { res.status(400).json({ error: 'gestionId es obligatorio' }); return }
   const gestionId = Number(req.body.gestionId)
 
-  const filas = await leerExcel(req.file.buffer)
+  const filas = await leerExcel(req.file.buffer, req.file.originalname)
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
 
   const cursos = await prisma.curso.findMany({ where: { gestionId } })
@@ -549,5 +549,15 @@ export const exportEstudiantes = asyncHandler(async (req: Request, res: Response
   const buffer = await generarExcel('Estudiantes', ['CI', 'Nombre', 'Apellido', 'RUDE', 'Curso', 'Estado'], filas)
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', `attachment; filename="estudiantes_gestion_${gestionId}.xlsx"`)
+  res.send(buffer)
+})
+
+// ─── GET /api/estudiantes/plantilla ────────────────────────────────────────
+export const plantillaEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const columnas = ['CI', 'Nombre', 'Apellido', 'FechaNacimiento', 'Direccion', 'RUDE', 'Curso']
+  const ejemplo  = { CI: '4567890', Nombre: 'Sofía', Apellido: 'Condori Mamani', FechaNacimiento: '15/03/2010', Direccion: 'Av. 6 de Agosto 123', RUDE: '12345678', Curso: '1AS' }
+  const buffer = await generarExcel('Plantilla', columnas, [ejemplo])
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', 'attachment; filename="plantilla_estudiantes.xlsx"')
   res.send(buffer)
 })

@@ -5,6 +5,7 @@
 // de leer filas y devolver un reporte fila-por-fila es la misma siempre.
 
 import ExcelJS from 'exceljs'
+import { Readable } from 'node:stream'
 
 export interface FilaImportada {
   fila: number                    // número de fila real en el Excel (para que el usuario la ubique)
@@ -21,12 +22,17 @@ export interface ResultadoImport<T> {
 
 // Lee la primera hoja de un buffer .xlsx y devuelve las filas como
 // objetos, usando la primera fila como encabezado (nombre de columna).
-export async function leerExcel(buffer: Buffer): Promise<FilaImportada[]> {
+export async function leerExcel(buffer: Buffer, nombreArchivo: string): Promise<FilaImportada[]> {
   const workbook = new ExcelJS.Workbook()
-  // ⚠️ exceljs trae su propia definición de Buffer, desalineada con
-  // @types/node@^25 — es un choque de TIPOS, no de runtime (el buffer
-  // real que llega de multer es válido). Se castea puntualmente acá.
-  await workbook.xlsx.load(buffer as any)
+  const esCsv = nombreArchivo.toLowerCase().endsWith('.csv')
+
+  if (esCsv) {
+    // exceljs también sabe leer CSV, solo pide un stream en vez de un buffer
+    await workbook.csv.read(Readable.from(buffer))
+  } else {
+    await workbook.xlsx.load(buffer as any)
+  }
+
   const hoja = workbook.worksheets[0]
   if (!hoja) throw new Error('El archivo no tiene hojas')
 

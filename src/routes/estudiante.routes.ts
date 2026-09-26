@@ -9,6 +9,7 @@ import {
   registrarResultado,
   importEstudiantes,
   exportEstudiantes,
+  plantillaEstudiantes,
 } from '../controllers/estudiante.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -61,5 +62,9 @@ router.get(
   requireRol('SECRETARIA', 'DIRECTOR'), 
   exportEstudiantes
 )
+
+// estudiante.routes.ts
+router.get('/plantilla', requireRol('DIRECTOR', 'SECRETARIA'), plantillaEstudiantes)
+
 
 export default router
