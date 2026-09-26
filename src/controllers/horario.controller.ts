@@ -1,13 +1,17 @@
 // src/controllers/horario.controller.ts
 //
 // Módulo de Horarios (OE6) — HU-12 (crear), HU-13 (detección de
-// conflictos), HU-14 (consulta de solo lectura para Docente/
-// Estudiante/Tutor). El modelo Horario ya existía en el schema v6
-// con @@unique([docenteMateriaCursoId, diaSemana, horaInicio]) como
-// respaldo a nivel BD; este archivo agrega el controller que faltaba.
+// conflictos), HU-14 (consulta para Docente/Estudiante/Tutor).
+//
+// LECTURA PÚBLICA: cualquier usuario autenticado puede consultar
+// cualquier horario (por curso, docente o asignación). La restricción
+// vive solo en la escritura (DIRECTOR/SECRETARIA en horario.routes.ts).
+// Las ramas de estudiante/tutor sin parámetros son una comodidad
+// (resuelven su propio curso), no una restricción.
 
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
 import type { DiaSemana } from '../../prisma/generated/prisma/enums.js'
 
 // horaInicio/horaFin son @db.Time en Postgres — Prisma los representa
@@ -59,9 +63,9 @@ async function buscarConflicto(
     include: {
       docenteMateriaCurso: {
         include: {
-              docente: { select: { persona: { select: { nombre: true, apellido: true } } } },
-              curso: { select: { nivel: true, grado: true, paralelo: true } },
-              materia: { select: { nombre: true } },
+          docente: { select: { persona: { select: { nombre: true, apellido: true } } } },
+          curso:   { select: { nivel: true, grado: true, paralelo: true } },
+          materia: { select: { nombre: true } },
         },
       },
     },
@@ -88,98 +92,117 @@ async function buscarConflicto(
   return null
 }
 
+function formatearHorario(h: any) {
+  return {
+    id:                    h.id,
+    diaSemana:             h.diaSemana,
+    horaInicio:            aTexto(h.horaInicio),
+    horaFin:               aTexto(h.horaFin),
+    aula:                  h.aula,
+    docenteMateriaCursoId: h.docenteMateriaCursoId,
+    materia:               h.docenteMateriaCurso.materia,
+    curso:                 h.docenteMateriaCurso.curso,
+    docente:               { id: h.docenteMateriaCurso.docente.id, ...h.docenteMateriaCurso.docente.persona },
+  }
+}
+
+const INCLUDE_COMPLETO = {
+  docenteMateriaCurso: {
+    include: {
+      materia: { select: { id: true, nombre: true } },
+      curso:   { select: { id: true, nivel: true, grado: true, paralelo: true } },
+      docente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
+    },
+  },
+}
+
 // ─── GET /api/horarios ─────────────────────────────────────────────────────
-// ?docenteMateriaCursoId=   → bloques de una asignación puntual
-// ?cursoId=&gestionId=      → horario semanal completo de un curso
-// ?docenteId=&gestionId=    → horario semanal completo de un docente
-// Sin filtros y con rol ESTUDIANTE/TUTOR → resuelve el curso propio/vinculado.
-export const getHorarios = async (req: Request, res: Response): Promise<void> => {
+// ?docenteMateriaCursoId= → bloques de una asignación puntual
+// ?cursoId=&gestionId=    → horario semanal completo de un curso
+// ?docenteId=&gestionId=  → horario semanal completo de un docente
+// Sin filtros y con rol ESTUDIANTE → resuelve su curso (inscripción activa).
+// Sin filtros y con rol TUTOR → requiere estudianteId y resuelve su curso.
+// Todo público para autenticados: sin validación de pertenencia.
+export const getHorarios = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const { cursoId, gestionId, docenteMateriaCursoId, docenteId, estudianteId } = req.query as {
     cursoId?: string; gestionId?: string; docenteMateriaCursoId?: string
     docenteId?: string; estudianteId?: string
   }
 
-  try {
-    const rolesAdmin   = req.user!.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r))
-    const soloDocente  = req.user!.roles.includes('DOCENTE')    && !rolesAdmin
-    const soloEstudiante = req.user!.roles.includes('ESTUDIANTE') && !rolesAdmin
-    const soloTutor    = req.user!.roles.includes('TUTOR')      && !rolesAdmin
+  const rolesAdmin     = req.user!.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r))
+  const soloEstudiante = req.user!.roles.includes('ESTUDIANTE') && !rolesAdmin
+  const soloTutor      = req.user!.roles.includes('TUTOR') && !rolesAdmin
 
-    let where: Record<string, unknown> = {}
+  let where: Record<string, unknown> = {}
 
-    if (docenteMateriaCursoId) {
-      const dmcId = Number(docenteMateriaCursoId)
-      if (soloDocente) {
-        const docente = await prisma.docente.findFirst({ where: { usuarioId: req.user!.id } })
-        const asig = await prisma.docenteMateriaCurso.findFirst({ where: { id: dmcId, docenteId: docente?.id } })
-        if (!asig) { res.status(403).json({ error: 'Sin acceso a esta materia/curso' }); return }
-      }
-      where = { docenteMateriaCursoId: dmcId }
-
-    } else if (soloEstudiante) {
-      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
-      const inscripcion = await prisma.inscripcion.findFirst({
-        where: { estudianteId: estudiante?.id, estadoInscripcion: 'ACTIVA', gestion: { activa: true } },
-      })
-      if (!inscripcion) { res.status(404).json({ error: 'No tienes una inscripción activa' }); return }
-      where = { docenteMateriaCurso: { cursoId: inscripcion.cursoId, gestionId: inscripcion.gestionId } }
-
-    } else if (soloTutor) {
-      if (!estudianteId) { res.status(400).json({ error: 'estudianteId es requerido' }); return }
-      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId: Number(estudianteId) } })
-      if (!vinculo) { res.status(403).json({ error: 'Sin permisos para ver este estudiante' }); return }
-      const inscripcion = await prisma.inscripcion.findFirst({
-        where: { estudianteId: Number(estudianteId), estadoInscripcion: 'ACTIVA', gestion: { activa: true } },
-      })
-      if (!inscripcion) { res.status(404).json({ error: 'El estudiante no tiene una inscripción activa' }); return }
-      where = { docenteMateriaCurso: { cursoId: inscripcion.cursoId, gestionId: inscripcion.gestionId } }
-
-    } else if (cursoId) {
-      where = { docenteMateriaCurso: { cursoId: Number(cursoId), ...(gestionId && { gestionId: Number(gestionId) }) } }
-
-    } else if (docenteId) {
-      where = { docenteMateriaCurso: { docenteId: Number(docenteId), ...(gestionId && { gestionId: Number(gestionId) }) } }
-
-    } else {
-      res.status(400).json({ error: 'Especifica cursoId, docenteId o docenteMateriaCursoId' })
+  if (docenteMateriaCursoId) {
+    const dmcId = Number(docenteMateriaCursoId)
+    if (!Number.isInteger(dmcId)) {
+      res.status(400).json({ error: 'docenteMateriaCursoId debe ser un número' })
       return
     }
+    where = { docenteMateriaCursoId: dmcId }
 
-    const horarios = await prisma.horario.findMany({
-      where,
-      include: {
-        docenteMateriaCurso: {
-          include: {
-            materia: { select: { id: true, nombre: true } },
-            curso:   { select: { id: true, nivel: true, grado: true, paralelo: true } },
-            docente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
-          },
-        },
-      },
-      orderBy: [{ diaSemana: 'asc' }, { horaInicio: 'asc' }],
+  } else if (soloEstudiante) {
+    const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
+    if (!estudiante) {
+      res.status(403).json({ error: 'Perfil de estudiante no encontrado' })
+      return
+    }
+    const inscripcion = await prisma.inscripcion.findFirst({
+      where: { estudianteId: estudiante.id, estadoInscripcion: 'ACTIVA', gestion: { activa: true } },
     })
+    if (!inscripcion) { res.status(404).json({ error: 'No tienes una inscripción activa' }); return }
+    where = { docenteMateriaCurso: { cursoId: inscripcion.cursoId, gestionId: inscripcion.gestionId } }
 
-    res.status(200).json(horarios.map(h => ({
-      id:                     h.id,
-      diaSemana:              h.diaSemana,
-      horaInicio:             aTexto(h.horaInicio),
-      horaFin:                aTexto(h.horaFin),
-      aula:                   h.aula,
-      docenteMateriaCursoId:  h.docenteMateriaCursoId,
-      materia:                h.docenteMateriaCurso.materia,
-      curso:                  h.docenteMateriaCurso.curso,
-      docente:                { id: h.docenteMateriaCurso.docente.id, ...h.docenteMateriaCurso.docente.persona },
-    })))
-  } catch (error) {
-    console.error('[horario.getHorarios]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  } else if (soloTutor) {
+    if (!estudianteId) { res.status(400).json({ error: 'estudianteId es requerido' }); return }
+    const estId = Number(estudianteId)
+    if (!Number.isInteger(estId)) {
+      res.status(400).json({ error: 'estudianteId debe ser un número' })
+      return
+    }
+    const inscripcion = await prisma.inscripcion.findFirst({
+      where: { estudianteId: estId, estadoInscripcion: 'ACTIVA', gestion: { activa: true } },
+    })
+    if (!inscripcion) { res.status(404).json({ error: 'El estudiante no tiene una inscripción activa' }); return }
+    where = { docenteMateriaCurso: { cursoId: inscripcion.cursoId, gestionId: inscripcion.gestionId } }
+
+  } else if (cursoId) {
+    const cId = Number(cursoId)
+    const gId = gestionId ? Number(gestionId) : undefined
+    if (!Number.isInteger(cId) || (gId !== undefined && !Number.isInteger(gId))) {
+      res.status(400).json({ error: 'cursoId y gestionId deben ser números' })
+      return
+    }
+    where = { docenteMateriaCurso: { cursoId: cId, ...(gId !== undefined && { gestionId: gId }) } }
+
+  } else if (docenteId) {
+    const dId = Number(docenteId)
+    const gId = gestionId ? Number(gestionId) : undefined
+    if (!Number.isInteger(dId) || (gId !== undefined && !Number.isInteger(gId))) {
+      res.status(400).json({ error: 'docenteId y gestionId deben ser números' })
+      return
+    }
+    where = { docenteMateriaCurso: { docenteId: dId, ...(gId !== undefined && { gestionId: gId }) } }
+
+  } else {
+    res.status(400).json({ error: 'Especifica cursoId, docenteId o docenteMateriaCursoId' })
+    return
   }
-}
+
+  const horarios = await prisma.horario.findMany({
+    where,
+    include: INCLUDE_COMPLETO,
+    orderBy: [{ diaSemana: 'asc' }, { horaInicio: 'asc' }],
+  })
+
+  res.status(200).json(horarios.map(formatearHorario))
+})
 
 // ─── POST /api/horarios ────────────────────────────────────────────────────
 // Solo Director/Secretaria (ver horario.routes.ts) — HU-12 + HU-13.
-export const createHorario = async (req: Request, res: Response): Promise<void> => {
+export const createHorario = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const { docenteMateriaCursoId, diaSemana, horaInicio, horaFin, aula } = req.body as HorarioInput
 
   if (!docenteMateriaCursoId || !diaSemana || !horaInicio || !horaFin) {
@@ -210,136 +233,99 @@ export const createHorario = async (req: Request, res: Response): Promise<void> 
 
     const conflicto = await buscarConflicto(dmc, diaSemana, inicio, fin)
     if (conflicto) {
-        res.status(409).json({
-            error: `Conflicto de horario (${conflicto.tipo === 'DOCENTE' ? 'docente' : 'curso'}): ${conflicto.detalle}`,
-        })
+      res.status(409).json({
+        error: `Conflicto de horario (${conflicto.tipo === 'DOCENTE' ? 'docente' : 'curso'}): ${conflicto.detalle}`,
+      })
       return
     }
 
-        // ✅ agregado el include — sin esto la respuesta no traía materia/curso/docente
-        const horario = await prisma.horario.create({
-            data: { docenteMateriaCursoId, diaSemana, horaInicio: inicio, horaFin: fin, aula },
-            include: {
-                docenteMateriaCurso: {
-                    include: {
-                        materia: { select: { id: true, nombre: true } },
-                        curso: { select: { id: true, nivel: true, grado: true, paralelo: true } },
-                        docente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
-                    },
-                },
-            },
-        })
+    const horario = await prisma.horario.create({
+      data: { docenteMateriaCursoId, diaSemana, horaInicio: inicio, horaFin: fin, aula },
+      include: INCLUDE_COMPLETO,
+    })
 
-        res.status(201).json({
-            id: horario.id,
-            diaSemana: horario.diaSemana,
-            horaInicio: aTexto(horario.horaInicio),
-            horaFin: aTexto(horario.horaFin),
-            aula: horario.aula,
-            docenteMateriaCursoId: horario.docenteMateriaCursoId,
-            materia: horario.docenteMateriaCurso.materia,
-            curso: horario.docenteMateriaCurso.curso,
-            docente: { id: horario.docenteMateriaCurso.docente.id, ...horario.docenteMateriaCurso.docente.persona },
-        })
-    } catch (error: any) {
-        if (error?.code === 'P2002') {
-            res.status(409).json({ error: 'Ya existe un bloque de horario idéntico para esta asignación' })
-            return
-        }
-        console.error('[horario.createHorario]', error)
-        res.status(500).json({ error: 'Error interno del servidor' })
+    res.status(201).json(formatearHorario(horario))
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      res.status(409).json({ error: 'Ya existe un bloque de horario idéntico para esta asignación' })
+      return
     }
-}
+    throw error // cualquier otro error sigue al error.middleware
+  }
+})
 
 // ─── PUT /api/horarios/:id ─────────────────────────────────────────────────
-export const updateHorario = async (req: Request, res: Response): Promise<void> => {
+export const updateHorario = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
+  }
   const { diaSemana, horaInicio, horaFin, aula } = req.body as HorarioInput
 
-  try {
-    const existente = await prisma.horario.findUnique({
-      where:   { id },
-      include: { docenteMateriaCurso: { select: { docenteId: true, cursoId: true, gestionId: true } } },
+  const existente = await prisma.horario.findUnique({
+    where:   { id },
+    include: { docenteMateriaCurso: { select: { docenteId: true, cursoId: true, gestionId: true } } },
+  })
+  if (!existente) {
+    res.status(404).json({ error: 'Horario no encontrado' })
+    return
+  }
+  if (diaSemana && !DIAS_VALIDOS.includes(diaSemana)) {
+    res.status(400).json({ error: `diaSemana debe ser uno de: ${DIAS_VALIDOS.join(', ')}` })
+    return
+  }
+
+  const diaFinal    = diaSemana ?? existente.diaSemana
+  const inicioFinal = horaInicio ? aHora(horaInicio) : existente.horaInicio
+  const finFinal    = horaFin    ? aHora(horaFin)    : existente.horaFin
+
+  if (finFinal <= inicioFinal) {
+    res.status(400).json({ error: 'horaFin debe ser posterior a horaInicio' })
+    return
+  }
+
+  const conflicto = await buscarConflicto(existente.docenteMateriaCurso, diaFinal, inicioFinal, finFinal, id)
+  if (conflicto) {
+    res.status(409).json({
+      error: `Conflicto de horario (${conflicto.tipo === 'DOCENTE' ? 'docente' : 'curso'}): ${conflicto.detalle}`,
     })
-    if (!existente) {
-      res.status(404).json({ error: 'Horario no encontrado' })
+    return
+  }
+
+  try {
+    const horario = await prisma.horario.update({
+      where: { id },
+      data: {
+        diaSemana:  diaFinal,
+        horaInicio: inicioFinal,
+        horaFin:    finFinal,
+        ...(aula !== undefined && { aula }),
+      },
+      include: INCLUDE_COMPLETO,
+    })
+    res.status(200).json(formatearHorario(horario))
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      res.status(409).json({ error: 'Ya existe un bloque de horario idéntico para esta asignación' })
       return
     }
-    if (diaSemana && !DIAS_VALIDOS.includes(diaSemana)) {
-      res.status(400).json({ error: `diaSemana debe ser uno de: ${DIAS_VALIDOS.join(', ')}` })
-      return
-    }
-
-    const diaFinal    = diaSemana ?? existente.diaSemana
-    const inicioFinal = horaInicio ? aHora(horaInicio) : existente.horaInicio
-    const finFinal    = horaFin    ? aHora(horaFin)    : existente.horaFin
-
-    if (finFinal <= inicioFinal) {
-      res.status(400).json({ error: 'horaFin debe ser posterior a horaInicio' })
-      return
-    }
-
-    const conflicto = await buscarConflicto(existente.docenteMateriaCurso, diaFinal, inicioFinal, finFinal, id)
-      if (conflicto) {
-          res.status(409).json({
-              error: `Conflicto de horario (${conflicto.tipo === 'DOCENTE' ? 'docente' : 'curso'}): ${conflicto.detalle}`,
-          })
-          return
-    }
-
-        const horario = await prisma.horario.update({
-            where: { id },
-            data: {
-                diaSemana: diaFinal,
-                horaInicio: inicioFinal,
-                horaFin: finFinal,
-                ...(aula !== undefined && { aula }),
-            },
-            include: {
-                docenteMateriaCurso: {
-                    include: {
-                        materia: { select: { id: true, nombre: true } },
-                        curso: { select: { id: true, nivel: true, grado: true, paralelo: true } },
-                        docente: { select: { id: true, persona: { select: { nombre: true, apellido: true } } } },
-                    },
-                },
-            },
-        })
-
-        res.status(200).json({
-            id: horario.id,
-            diaSemana: horario.diaSemana,
-            horaInicio: aTexto(horario.horaInicio),
-            horaFin: aTexto(horario.horaFin),
-            aula: horario.aula,
-            docenteMateriaCursoId: horario.docenteMateriaCursoId,
-            materia: horario.docenteMateriaCurso.materia,
-            curso: horario.docenteMateriaCurso.curso,
-            docente: { id: horario.docenteMateriaCurso.docente.id, ...horario.docenteMateriaCurso.docente.persona },
-        })
-    } catch (error: any) {
-        if (error?.code === 'P2002') {
-            res.status(409).json({ error: 'Ya existe un bloque de horario idéntico para esta asignación' })
-            return
-        }
-        console.error('[horario.updateHorario]', error)
-        res.status(500).json({ error: 'Error interno del servidor' })
-    }
-}
+    throw error // cualquier otro error sigue al error.middleware
+  }
+})
 
 // ─── DELETE /api/horarios/:id ──────────────────────────────────────────────
-export const deleteHorario = async (req: Request, res: Response): Promise<void> => {
+export const deleteHorario = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  try {
-    const existe = await prisma.horario.findUnique({ where: { id } })
-    if (!existe) {
-      res.status(404).json({ error: 'Horario no encontrado' })
-      return
-    }
-    await prisma.horario.delete({ where: { id } })
-    res.status(200).json({ message: 'Bloque de horario eliminado correctamente' })
-  } catch (error) {
-    console.error('[horario.deleteHorario]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: 'ID inválido' })
+    return
   }
-}
+  const existe = await prisma.horario.findUnique({ where: { id } })
+  if (!existe) {
+    res.status(404).json({ error: 'Horario no encontrado' })
+    return
+  }
+  await prisma.horario.delete({ where: { id } })
+  res.status(200).json({ message: 'Bloque de horario eliminado correctamente' })
+})
