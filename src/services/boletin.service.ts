@@ -72,6 +72,45 @@ export interface MejoresEstudiantesResponse {
   anual: MejorEstudianteItem[]
 }
 
+export interface DetalleActividad {
+  actividadEvaluativaId: number
+  nombre: string
+  nota: number | null
+  puntajeMaximo: number
+}
+ 
+export interface DetalleDimension {
+  dimensionId: number
+  nombre: string
+  promedio: number | null       // CalificacionDimension.promedio — el mismo que ya usa el resto del sistema
+  actividades: DetalleActividad[]
+}
+ 
+export interface DetalleTrimestre {
+  trimestreId: number
+  numero: number
+  nombre: string
+  dimensiones: DetalleDimension[]
+  total: number | null          // Calificacion.promedioTrimestral de esa materia en ese trimestre
+}
+ 
+export interface DetalleMateria {
+  docenteMateriaCursoId: number
+  nombre: string
+  campoSaber: string | null
+  trimestres: DetalleTrimestre[]
+  promedioAnual: number | null  // PromedioFinal.promedioFinal
+  resultado: 'PENDIENTE' | 'PROMOVIDO' | 'REPROBADO'
+}
+ 
+export interface DetalleBoletinEstudiante {
+  inscripcionId: number
+  estudianteId: number
+  nombreCompleto: string
+  curso: BoletinGeneral['curso']
+  materias: DetalleMateria[]
+}
+
 // Redondea a `decimales` posiciones, o null si el valor es null/undefined.
 function redondear(valor: number | null | undefined, decimales: number): number | null {
   if (valor === null || valor === undefined) return null
@@ -279,4 +318,135 @@ export async function obtenerMejoresEstudiantes(cursoId: number, limite = 3): Pr
   )
  
   return { curso: boletin.curso, trimestres: boletin.trimestres, porTrimestre, anual }
+}
+
+
+// Detalle completo de UN estudiante: cada actividad evaluativa dentro de
+// cada dimensión, por cada materia y cada trimestre — a diferencia de
+// generarBoletinGeneral() (que solo trae el promedio ya calculado), acá
+// se baja hasta NotaActividad. Pensado para la tarjeta de detalle, no
+// para la tabla del curso completo (sería demasiado pesado pedir esto
+// por cada fila de 30 estudiantes a la vez).
+export async function obtenerDetalleBoletinEstudiante(inscripcionId: number): Promise<DetalleBoletinEstudiante> {
+  const inscripcion = await prisma.inscripcion.findUniqueOrThrow({
+    where: { id: inscripcionId },
+    select: {
+      id: true,
+      estudianteId: true,
+      cursoId: true,
+      gestionId: true,
+      estudiante: { select: { persona: { select: { nombre: true, apellido: true } } } },
+      curso: { select: { nivel: true, grado: true, paralelo: true, turno: true, gestion: { select: { anio: true } } } },
+    },
+  })
+ 
+  const [dimensiones, asignaciones, trimestres] = await Promise.all([
+    prisma.dimensionEvaluacion.findMany({
+      where: { gestionId: inscripcion.gestionId },
+      orderBy: { orden: 'asc' },
+      select: { id: true, nombre: true },
+    }),
+    prisma.docenteMateriaCurso.findMany({
+      where: { cursoId: inscripcion.cursoId, gestionId: inscripcion.gestionId },
+      select: {
+        id: true,
+        materia: { select: { nombre: true, campoSaber: { select: { nombre: true, orden: true } } } },
+      },
+    }),
+    prisma.trimestre.findMany({
+      where: { gestionId: inscripcion.gestionId },
+      orderBy: { numero: 'asc' },
+      select: { id: true, numero: true, nombre: true },
+    }),
+  ])
+ 
+  asignaciones.sort((a, b) => {
+    const oa = a.materia.campoSaber?.orden ?? Number.MAX_SAFE_INTEGER
+    const ob = b.materia.campoSaber?.orden ?? Number.MAX_SAFE_INTEGER
+    return oa !== ob ? oa - ob : a.materia.nombre.localeCompare(b.materia.nombre)
+  })
+ 
+  const dmcIds = asignaciones.map(a => a.id)
+  const trimestreIds = trimestres.map(t => t.id)
+ 
+  const [actividades, calificaciones, promediosFinales] = await Promise.all([
+    prisma.actividadEvaluativa.findMany({
+      where: { docenteMateriaCursoId: { in: dmcIds }, trimestreId: { in: trimestreIds }, activo: true },
+      select: {
+        id: true, nombre: true, puntajeMaximo: true, docenteMateriaCursoId: true, trimestreId: true, dimensionId: true,
+        notas: { where: { inscripcionId }, select: { nota: true } },
+      },
+      orderBy: { fecha: 'asc' },
+    }),
+    prisma.calificacion.findMany({
+      where: { inscripcionId, docenteMateriaCursoId: { in: dmcIds }, trimestreId: { in: trimestreIds } },
+      select: {
+        docenteMateriaCursoId: true, trimestreId: true, promedioTrimestral: true,
+        dimensiones: { select: { dimensionId: true, promedio: true } },
+      },
+    }),
+    prisma.promedioFinal.findMany({
+      where: { inscripcionId, docenteMateriaCursoId: { in: dmcIds } },
+      select: { docenteMateriaCursoId: true, promedioFinal: true, resultado: true },
+    }),
+  ])
+ 
+  const materias: DetalleMateria[] = asignaciones.map(dmc => {
+    const trimestresMateria: DetalleTrimestre[] = trimestres.map(t => {
+      const cal = calificaciones.find(c => c.docenteMateriaCursoId === dmc.id && c.trimestreId === t.id)
+ 
+      const dimensionesMateria: DetalleDimension[] = dimensiones.map(dim => {
+        const actividadesDim = actividades.filter(
+          a => a.docenteMateriaCursoId === dmc.id && a.trimestreId === t.id && a.dimensionId === dim.id
+        )
+        const calDim = cal?.dimensiones.find(cd => cd.dimensionId === dim.id)
+        return {
+          dimensionId: dim.id,
+          nombre: dim.nombre,
+          promedio: calDim ? Number(calDim.promedio) : null,
+          actividades: actividadesDim.map(a => ({
+            actividadEvaluativaId: a.id,
+            nombre: a.nombre,
+            nota: a.notas[0] ? Number(a.notas[0].nota) : null,
+            puntajeMaximo: Number(a.puntajeMaximo),
+          })),
+        }
+      })
+ 
+      return {
+        trimestreId: t.id,
+        numero: t.numero,
+        nombre: t.nombre,
+        dimensiones: dimensionesMateria,
+        total: cal?.promedioTrimestral !== undefined && cal?.promedioTrimestral !== null ? Number(cal.promedioTrimestral) : null,
+      }
+    })
+ 
+    const final = promediosFinales.find(p => p.docenteMateriaCursoId === dmc.id)
+ 
+    return {
+      docenteMateriaCursoId: dmc.id,
+      nombre: dmc.materia.nombre,
+      campoSaber: dmc.materia.campoSaber?.nombre ?? null,
+      trimestres: trimestresMateria,
+      promedioAnual: final ? Number(final.promedioFinal) : null,
+      resultado: (final?.resultado ?? 'PENDIENTE'),
+    }
+  })
+ 
+  return {
+    inscripcionId: inscripcion.id,
+    estudianteId: inscripcion.estudianteId,
+    nombreCompleto: `${inscripcion.estudiante.persona.apellido} ${inscripcion.estudiante.persona.nombre}`,
+    curso: {
+      id: inscripcion.cursoId,
+      nivel: inscripcion.curso.nivel as any,
+      grado: inscripcion.curso.grado,
+      paralelo: inscripcion.curso.paralelo,
+      turno: inscripcion.curso.turno as any,
+      gestionId: inscripcion.gestionId,
+      anioGestion: inscripcion.curso.gestion.anio,
+    },
+    materias,
+  }
 }

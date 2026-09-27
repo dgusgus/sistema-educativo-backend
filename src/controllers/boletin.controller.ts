@@ -5,9 +5,13 @@ import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 
 
 import { asyncHandler } from '../lib/asyncHandler.js'
-import { esDocenteDelCurso } from '../lib/ownership.helper.js'
 import { generarBoletinGeneral } from '../services/boletin.service.js'
 import { obtenerMejoresEstudiantes as calcularMejoresEstudiantes } from '../services/boletin.service.js'
+import { esDocenteDelCurso, esFamiliaDeEstudiante } from '../lib/ownership.helper.js'
+import { obtenerDetalleBoletinEstudiante } from '../services/boletin.service.js'
+ 
+
+
 
 // NOTA: el boletín muestra Calificacion.promedioTrimestral (el promedio
 // ya ponderado por dimensiones — ver calificacion.helper.ts). No
@@ -628,3 +632,34 @@ export const generarLibreta = async (req: Request, res: Response): Promise<void>
     }
   }
 }
+
+
+// GET /api/boletin/detalle/:inscripcionId
+export const obtenerDetalleEstudiante = asyncHandler(async (req, res) => {
+  const inscripcionId = Number(req.params.inscripcionId)
+  if (!Number.isInteger(inscripcionId)) {
+    res.status(400).json({ error: 'inscripcionId inválido' })
+    return
+  }
+ 
+  const inscripcion = await prisma.inscripcion.findUnique({
+    where: { id: inscripcionId },
+    select: { estudianteId: true, cursoId: true, gestionId: true },
+  })
+  if (!inscripcion) {
+    res.status(404).json({ error: 'La inscripción no existe' })
+    return
+  }
+ 
+  const tieneAcceso =
+    (await esDocenteDelCurso(req, inscripcion.cursoId, inscripcion.gestionId)) ||
+    (await esFamiliaDeEstudiante(req, inscripcion.estudianteId))
+ 
+  if (!tieneAcceso) {
+    res.status(403).json({ error: 'Sin acceso a este estudiante' })
+    return
+  }
+ 
+  const detalle = await obtenerDetalleBoletinEstudiante(inscripcionId)
+  res.json(detalle)
+})

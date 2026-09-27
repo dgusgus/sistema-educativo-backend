@@ -5,6 +5,7 @@ import {
   obtenerBoletinGeneral,
   obtenerMejoresEstudiantes,
   generarLibreta,
+  obtenerDetalleEstudiante,
 } from '../controllers/boletin.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -13,30 +14,34 @@ const router = Router()
 router.use(authMiddleware)
 
 // ⚠️ RUTAS ESPECÍFICAS SIEMPRE ANTES que '/:estudianteId/:trimestreId' —
-// mismo motivo que /export y /plantilla van antes de /:id en
-// estudiante.routes.ts, docente.routes.ts, tutor.routes.ts. '/general',
-// '/mejores' y '/curso' tienen la MISMA forma (boletin + 2 segmentos) que
-// la genérica de abajo, así que si esta línea se mueve después de esa,
-// vuelve a romperse exactamente como estaba.
+// '/general', '/mejores' y '/detalle' tienen la MISMA forma (boletin + 2
+// segmentos) que esa genérica; si se registran después, la genérica se
+// las come (ver el bug real que tenías con '/general').
 
-// Boletín General del curso en pantalla (JSON) — admin o docente
-// asignado (esDocenteDelCurso ya filtra fino adentro del controller)
+// Boletín General del curso en pantalla (JSON)
 router.get(
   '/general/:cursoId',
   requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'),
   obtenerBoletinGeneral
 )
 
-// Mejores Estudiantes del curso (JSON) — mismo criterio de acceso
+// Mejores Estudiantes del curso (JSON)
 router.get(
   '/mejores/:cursoId',
   requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'),
   obtenerMejoresEstudiantes
 )
 
-// Libreta anual (PDF) — mismo criterio de pertenencia que el boletín
-// individual: Director/Secretaria sin filtro, Estudiante/Tutor solo lo
-// suyo (RBAC de pertenencia vive dentro del controller)
+// Detalle de un estudiante: dimensiones + actividades por trimestre y
+// materia (JSON) — para la tarjeta de detalle. RBAC de pertenencia
+// (docente asignado / familia del estudiante) vive dentro del controller.
+router.get(
+  '/detalle/:inscripcionId',
+  requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR'),
+  obtenerDetalleEstudiante
+)
+
+// Libreta anual (PDF)
 router.get(
   '/libreta/:estudianteId/:gestionId',
   requireRol('DIRECTOR', 'SECRETARIA', 'ESTUDIANTE', 'TUTOR'),
@@ -50,9 +55,7 @@ router.get(
   generarBoletinesCurso
 )
 
-// Boletín individual (PDF, 1 trimestre) — SIEMPRE AL FINAL: es la
-// genérica de 2 parámetros que se come cualquier ruta más específica
-// registrada después de ella.
+// Boletín individual (PDF, 1 trimestre) — SIEMPRE AL FINAL
 router.get(
   '/:estudianteId/:trimestreId',
   requireRol('DIRECTOR', 'SECRETARIA', 'ESTUDIANTE', 'TUTOR'),
