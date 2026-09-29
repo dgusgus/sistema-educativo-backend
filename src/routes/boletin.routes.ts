@@ -6,6 +6,7 @@ import {
   obtenerMejoresEstudiantes,
   generarLibreta,
   obtenerDetalleEstudiante,
+  obtenerDetallePorEstudiante,
 } from '../controllers/boletin.controller.js'
 import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
@@ -39,6 +40,15 @@ router.get(
   '/detalle/:inscripcionId',
   requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR'),
   obtenerDetalleEstudiante
+)
+
+// Mismo detalle, resuelto por estudianteId + gestionId en vez de
+// inscripcionId — para el preview en BoletinesView (tab Individual), donde
+// el buscador solo devuelve el estudiante, no la inscripción.
+router.get(
+  '/detalle-por-estudiante/:estudianteId/:gestionId',
+  requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR'),
+  obtenerDetallePorEstudiante
 )
 
 // Libreta anual (PDF)

@@ -651,7 +651,12 @@ export const obtenerDetalleEstudiante = asyncHandler(async (req, res) => {
     return
   }
  
+  // ✅ Mismo criterio que generarBoletin: Director/Secretaria ven cualquier
+  // estudiante sin restricción de pertenencia. Antes este chequeo solo
+  // contemplaba docente/familia, así que Director/Secretaria pasaban el
+  // requireRol() de la ruta pero caían en 403 acá adentro.
   const tieneAcceso =
+    req.user!.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r)) ||
     (await esDocenteDelCurso(req, inscripcion.cursoId, inscripcion.gestionId)) ||
     (await esFamiliaDeEstudiante(req, inscripcion.estudianteId))
  
@@ -661,5 +666,41 @@ export const obtenerDetalleEstudiante = asyncHandler(async (req, res) => {
   }
  
   const detalle = await obtenerDetalleBoletinEstudiante(inscripcionId)
+  res.json(detalle)
+})
+
+// GET /api/boletin/detalle-por-estudiante/:estudianteId/:gestionId
+// Mismo detalle que obtenerDetalleEstudiante, pero para cuando el frontend
+// solo tiene el estudianteId (ej: buscador de BoletinesView) y no conoce
+// el inscripcionId. Resuelve la inscripción igual que generarBoletin
+// (estudianteId + gestionId → inscripción de esa gestión).
+export const obtenerDetallePorEstudiante = asyncHandler(async (req, res) => {
+  const estudianteId = Number(req.params.estudianteId)
+  const gestionId = Number(req.params.gestionId)
+  if (!Number.isInteger(estudianteId) || !Number.isInteger(gestionId)) {
+    res.status(400).json({ error: 'estudianteId o gestionId inválido' })
+    return
+  }
+
+  const inscripcion = await prisma.inscripcion.findFirst({
+    where: { estudianteId, gestionId },
+    select: { id: true, cursoId: true, gestionId: true, estudianteId: true },
+  })
+  if (!inscripcion) {
+    res.status(404).json({ error: 'El estudiante no está inscrito en esa gestión' })
+    return
+  }
+
+  const tieneAcceso =
+    req.user!.roles.some(r => ['DIRECTOR', 'SECRETARIA'].includes(r)) ||
+    (await esDocenteDelCurso(req, inscripcion.cursoId, inscripcion.gestionId)) ||
+    (await esFamiliaDeEstudiante(req, inscripcion.estudianteId))
+
+  if (!tieneAcceso) {
+    res.status(403).json({ error: 'Sin acceso a este estudiante' })
+    return
+  }
+
+  const detalle = await obtenerDetalleBoletinEstudiante(inscripcion.id)
   res.json(detalle)
 })
