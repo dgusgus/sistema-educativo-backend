@@ -211,6 +211,90 @@ export const cerrarTrimestre = async (req: Request, res: Response): Promise<void
   }
 }
 
+// ─── GET /api/trimestres/:id/pendientes ───────────────────────────────────────
+// Vista de "qué falta para cerrar": MISMA regla de completitud que
+// cerrarTrimestre (cada DocenteMateriaCurso debe tener promedioTrimestral
+// para cada estudiante ACTIVO de su curso), pero en modo solo-lectura y con
+// nombres — alimenta el widget de pendientes del Dashboard. No escribe nada.
+export const getPendientesCierre = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+
+  try {
+    const trimestre = await prisma.trimestre.findUnique({
+      where: { id },
+      select: { id: true, numero: true, nombre: true, cerrado: true, gestionId: true },
+    })
+    if (!trimestre) {
+      res.status(404).json({ error: 'Trimestre no encontrado' })
+      return
+    }
+
+    const dmcs = await prisma.docenteMateriaCurso.findMany({
+      where: { gestionId: trimestre.gestionId },
+      select: {
+        id: true,
+        cursoId: true,
+        materia: { select: { nombre: true, codigo: true } },
+        curso:   { select: { grado: true, paralelo: true, nivel: true } },
+        docente: { select: { persona: { select: { nombre: true, apellido: true } } } },
+      },
+      orderBy: { cursoId: 'asc' },
+    })
+
+    const pendientes = []
+    let totalEsperados = 0
+    let totalRegistrados = 0
+
+    for (const dmc of dmcs) {
+      const inscripciones = await prisma.inscripcion.findMany({
+        where: { cursoId: dmc.cursoId, gestionId: trimestre.gestionId, estadoInscripcion: 'ACTIVA' },
+        select: { id: true, estudiante: { select: { persona: { select: { nombre: true, apellido: true } } } } },
+      })
+      if (inscripciones.length === 0) continue
+
+      const calificaciones = await prisma.calificacion.findMany({
+        where: { docenteMateriaCursoId: dmc.id, trimestreId: id, promedioTrimestral: { not: null } },
+        select: { inscripcionId: true },
+      })
+      const conNota = new Set(calificaciones.map(c => c.inscripcionId))
+      const faltantes = inscripciones
+        .filter(i => !conNota.has(i.id))
+        .map(i => ({
+          inscripcionId: i.id,
+          nombreCompleto: `${i.estudiante.persona.apellido} ${i.estudiante.persona.nombre}`,
+        }))
+
+      totalEsperados   += inscripciones.length
+      totalRegistrados += inscripciones.length - faltantes.length
+
+      pendientes.push({
+        docenteMateriaCursoId: dmc.id,
+        materia:  dmc.materia,
+        curso:    dmc.curso,
+        docente:  `${dmc.docente.persona.apellido} ${dmc.docente.persona.nombre}`,
+        totalEsperados: inscripciones.length,
+        registrados:    inscripciones.length - faltantes.length,
+        faltantes,
+      })
+    }
+
+    res.status(200).json({
+      trimestre,
+      resumen: {
+        totalMaterias:     pendientes.length,
+        materiasCompletas: pendientes.filter(p => p.faltantes.length === 0).length,
+        totalEsperados,
+        totalRegistrados,
+        totalFaltantes: totalEsperados - totalRegistrados,
+      },
+      pendientes,
+    })
+  } catch (error) {
+    console.error('[calificacion.getPendientesCierre]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
 // ─── GET /api/calificaciones/estudiante ──────────────────────────────────────
 export const getCalificacionesEstudiante = async (req: Request, res: Response): Promise<void> => {
   const { estudianteId, gestionId } = req.query as {
