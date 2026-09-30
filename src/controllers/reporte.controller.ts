@@ -53,7 +53,7 @@ export const getDashboard = async (_req: Request, res: Response): Promise<void> 
 
     const trimestres = await prisma.trimestre.findMany({
       where: { gestionId: gestion.id },
-      select: { numero: true, nombre: true, cerrado: true },
+      select: { id: true, numero: true, nombre: true, cerrado: true },
       orderBy: { numero: 'asc' },
     })
 
