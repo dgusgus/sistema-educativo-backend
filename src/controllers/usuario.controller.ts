@@ -278,9 +278,11 @@ export const resetearPassword = async (req: Request, res: Response): Promise<voi
 
     const passwordHash = await bcrypt.hash(nuevaPassword, 12)
 
+    // También se limpia el bloqueo por intentos fallidos: si el usuario
+    // estaba bloqueado, el reseteo debe dejarlo poder entrar con la clave nueva.
     await prisma.usuario.update({
       where: { id },
-      data:  { passwordHash },
+      data:  { passwordHash, intentosFallidos: 0, bloqueadoHasta: null },
     })
 
     res.status(200).json({
