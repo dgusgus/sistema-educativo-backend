@@ -1,9 +1,9 @@
 import { Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
-import jwt, { type SignOptions } from 'jsonwebtoken'
 import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
+import { firmarToken } from '../lib/token.helper.js'
 
 const MAX_INTENTOS_FALLIDOS = 5
 const MINUTOS_BLOQUEO       = 15
@@ -104,11 +104,9 @@ export const login = asyncHandler(async (req: Request, res: Response): Promise<v
   const perfil = primerPerfil(usuario)
   const nombre = perfil ? `${perfil.persona.nombre} ${perfil.persona.apellido}` : usuario.username
 
-  const token = jwt.sign(
-    { id: usuario.id, roles: usuario.roles, username: usuario.username, nombre },
-    process.env.JWT_SECRET ?? 'secret',
-    { expiresIn: (process.env.JWT_EXPIRES_IN ?? '8h') as SignOptions['expiresIn'] }
-  )
+  const token = firmarToken({
+    id: usuario.id, roles: usuario.roles, username: usuario.username, nombre, passwordHash: usuario.passwordHash,
+  })
 
   res.status(200).json({
     token,
@@ -202,7 +200,15 @@ export const cambiarPassword = async (req: Request, res: Response): Promise<void
       data:  { passwordHash: nuevoHash },
     })
 
-    res.status(200).json({ message: 'Contraseña actualizada correctamente' })
+    // Cambiar la contraseña invalida los tokens anteriores (incluido el que
+    // se usó para esta petición). Se devuelve uno nuevo para que el usuario
+    // NO tenga que volver a iniciar sesión: el frontend debe guardarlo.
+    const token = firmarToken({
+      id: usuario.id, roles: usuario.roles, username: usuario.username,
+      nombre: req.user!.nombre, passwordHash: nuevoHash,
+    })
+
+    res.status(200).json({ message: 'Contraseña actualizada correctamente', token })
   } catch (error) {
     console.error('[auth.cambiarPassword]', error)
     res.status(500).json({ error: 'Error interno del servidor' })

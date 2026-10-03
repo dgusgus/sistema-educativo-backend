@@ -5,10 +5,12 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ue_angeles_2025
+      # Se lee del archivo .env (la misma que usa DATABASE_URL). Si falta, docker compose avisa.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en el archivo .env}
       POSTGRES_DB: ue_angeles
     ports:
-      - "5432:5432"
+      # Solo accesible desde tu propia máquina (antes quedaba expuesto a toda la red)
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
