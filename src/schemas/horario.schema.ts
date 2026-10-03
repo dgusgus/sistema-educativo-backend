@@ -1,20 +1,29 @@
-// src/schemas/horario.schema.ts (ejemplo con el módulo que ya armamos)
+// src/schemas/horario.schema.ts
 import { z } from 'zod'
+import { enumES, hora, id, opcional, textoOpc } from './common.schema.js'
 
-export const horarioPayloadSchema = z.object({
-  docenteMateriaCursoId: z.number().int().positive(),
-  diaSemana: z.enum(['LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO']),
-  horaInicio: z.string().regex(/^\d{2}:\d{2}$/, 'Formato HH:mm'),
-  horaFin: z.string().regex(/^\d{2}:\d{2}$/, 'Formato HH:mm'),
-  aula: z.string().optional(),
-})
+const DIAS = ['LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO'] as const
 
-// El tipo sale GRATIS del schema — nunca más se desincroniza con la validación
-export type HorarioPayload = z.infer<typeof horarioPayloadSchema>
+// El controlador convierte "HH:mm" con new Date(`1970-01-01T${hhmm}:00Z`): una hora
+// como "25:99" daba Invalid Date y terminaba en error 500. Ahora se rechaza aquí.
+const finPosterior = (o: { horaInicio?: string; horaFin?: string }) =>
+  o.horaInicio === undefined || o.horaFin === undefined || o.horaFin > o.horaInicio   // "HH:mm" se ordena como texto
 
-/* 
-// en el controller
-export const createHorario = asyncHandler(async (req: Request, res: Response) => {
-  const datos = horarioPayloadSchema.parse(req.body)   // lanza ZodError si algo está mal
-  // ... acá `datos` ya está tipado y validado, sin ifs manuales
-}) */
+export const createHorarioSchema = z
+  .object({
+    docenteMateriaCursoId: id,
+    diaSemana:             enumES(DIAS),
+    horaInicio:            hora,
+    horaFin:               hora,
+    aula:                  textoOpc(50),
+  })
+  .refine(finPosterior, { message: 'horaFin debe ser posterior a horaInicio', path: ['horaFin'] })
+
+export const updateHorarioSchema = z
+  .object({
+    diaSemana:  opcional(enumES(DIAS)),
+    horaInicio: opcional(hora),
+    horaFin:    opcional(hora),
+    aula:       textoOpc(50),
+  })
+  .refine(finPosterior, { message: 'horaFin debe ser posterior a horaInicio', path: ['horaFin'] })

@@ -65,6 +65,13 @@ export const createTrimestre = async (req: Request, res: Response): Promise<void
     return
   }
 
+  // Trimestre.fechaInicio / fechaFin son obligatorias en la BD: sin este
+  // chequeo, omitirlas terminaba en un 500 de Prisma en vez de un 400 claro.
+  if (!fechaInicio || !fechaFin) {
+    res.status(400).json({ error: 'fechaInicio y fechaFin son obligatorias' })
+    return
+  }
+
   try {
     const existe = await prisma.trimestre.findUnique({
       where: { numero_gestionId: { numero, gestionId } },
@@ -79,8 +86,8 @@ export const createTrimestre = async (req: Request, res: Response): Promise<void
         numero,
         nombre,
         gestionId,
-        fechaInicio: fechaInicio ? new Date(fechaInicio) : undefined,
-        fechaFin:    fechaFin    ? new Date(fechaFin)    : undefined,
+        fechaInicio: new Date(fechaInicio),
+        fechaFin:    new Date(fechaFin),
       },
     })
     res.status(201).json(trimestre)

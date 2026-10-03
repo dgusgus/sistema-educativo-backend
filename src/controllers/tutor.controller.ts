@@ -2,7 +2,10 @@ import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
-import { leerExcel, generarExcel } from '../lib/excel.helper.js'
+import { leerExcel, generarExcel, texto, type ColumnaImport } from '../lib/excel.helper.js'
+import { ejecutarImport, mensajeValidacion, sinTildes } from '../lib/import.helper.js'
+import { ErrorDeUsuario } from '../lib/errores.js'
+import { createTutorSchema } from '../schemas/persona.schema.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 
 // tutor.controller.ts — agregar arriba del todo, junto a los imports
@@ -12,7 +15,7 @@ type ParentescoValido = typeof PARENTESCOS_VALIDOS[number]
 function normalizarParentesco(valor: string): ParentescoValido {
   const limpio = valor.trim().toUpperCase().replace(/\s+/g, '_')
   if (!PARENTESCOS_VALIDOS.includes(limpio as ParentescoValido)) {
-    throw new Error(`Parentesco "${valor}" inválido — debe ser uno de: ${PARENTESCOS_VALIDOS.join(', ')}`)
+    throw new ErrorDeUsuario(`Parentesco "${valor}" inválido — debe ser uno de: ${PARENTESCOS_VALIDOS.join(', ')}`)
   }
   return limpio as ParentescoValido
 }
@@ -276,66 +279,125 @@ export const desvincularEstudiante = async (req: Request, res: Response): Promis
 // ─── POST /api/tutores/import ──────────────────────────────────────────────
 // Columnas: CI, Nombre, Apellido, Ocupacion, GradoInstruccion, Email,
 // Telefono, EstudianteCI (opcional), Parentesco (obligatorio SI viene EstudianteCI)
-// Si EstudianteCI viene y existe, vincula al tutor con ese estudiante en
-// la misma transacción — si no existe, la fila entera falla (mismo
-// criterio "todo o nada por fila" que el resto de los imports).
+//
+// Un tutor con varios hijos va en VARIAS filas con el mismo CI (una por hijo):
+// es exactamente lo que genera el export. La primera fila crea al tutor y las
+// siguientes solo agregan el vínculo con otro estudiante. Antes, la segunda fila
+// fallaba con "Ya existe una persona con CI…" y el archivo exportado no se podía
+// volver a importar.
+// "Todo o nada por fila": si el estudiante no existe, esa fila entera falla.
+const COLUMNAS_IMPORT_TUTOR: ColumnaImport[] = [
+  { clave: 'CI',               obligatoria: true, alias: ['Cedula', 'Carnet', 'Cedula de identidad'] },
+  { clave: 'Nombre',           obligatoria: true, alias: ['Nombres'] },
+  { clave: 'Apellido',         obligatoria: true, alias: ['Apellidos'] },
+  { clave: 'Ocupacion' },
+  { clave: 'GradoInstruccion', alias: ['Grado de instruccion', 'Instruccion'] },
+  { clave: 'Email',            alias: ['Correo', 'Correo electronico'] },
+  { clave: 'Telefono',         alias: ['Celular', 'Cel'] },
+  { clave: 'EstudianteCI',     alias: ['CI Estudiante', 'CI del estudiante', 'CI hijo'] },
+  { clave: 'Parentesco' },
+]
+
 export const importTutores = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-  if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
-  const filas = await leerExcel(req.file.buffer, req.file.originalname)
+  const { filas, advertencias } = await leerExcel(req.file!.buffer, COLUMNAS_IMPORT_TUTOR)
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
 
-  const resultado = { totalFilas: filas.length, exitosas: 0, fallidas: 0, creados: [] as unknown[], errores: [] as Array<{ fila: number; error: string }> }
+  const seguro = (v: Parameters<typeof texto>[0]) => { try { return texto(v) } catch { return '' } }
 
-  for (const { fila, datos } of filas) {
-    try {
-      const ci       = String(datos['CI'] ?? '').trim()
-      const nombre   = String(datos['Nombre'] ?? '').trim()
-      const apellido = String(datos['Apellido'] ?? '').trim()
-      if (!ci || !nombre || !apellido) throw new Error('CI, Nombre y Apellido son obligatorios')
+  // Consultas únicas en vez de varias por fila
+  const cis    = [...new Set(filas.map(f => seguro(f.datos.CI)).filter(Boolean))]
+  const estCis = [...new Set(filas.map(f => seguro(f.datos.EstudianteCI)).filter(Boolean))]
 
-      const yaExiste = await buscarPersonaPorCi(ci)
-      if (yaExiste) throw new Error(`Ya existe una persona con CI ${ci}`)
+  const personas = await prisma.persona.findMany({
+    where:  { ci: { in: cis } },
+    select: { ci: true, nombre: true, apellido: true, tutor: { select: { id: true } } },
+  })
+  const personaPorCi = new Map(personas.filter(p => p.ci !== null).map(p => [p.ci as string, p]))
 
-      const estudianteCi = datos['EstudianteCI'] ? String(datos['EstudianteCI']).trim() : ''
-      const parentesco = datos['Parentesco'] ? normalizarParentesco(String(datos['Parentesco'])) : ''
+  const estudiantes = estCis.length === 0 ? [] : await prisma.estudiante.findMany({
+    where:  { persona: { ci: { in: estCis } } },
+    select: { id: true, persona: { select: { ci: true } } },
+  })
+  const estudiantePorCi = new Map(estudiantes.map(e => [e.persona.ci as string, e.id]))
 
-      let estudiante = null
-      if (estudianteCi) {
-        estudiante = await prisma.estudiante.findFirst({ where: { persona: { ci: estudianteCi } } })
-        if (!estudiante) throw new Error(`No se encontró un estudiante con CI ${estudianteCi}`)
-        if (!parentesco) throw new Error('Parentesco es obligatorio cuando se indica EstudianteCI')
-      }
+  // Tutores creados en ESTE archivo (para las filas siguientes del mismo CI)
+  const creadosAqui = new Map<string, { tutorId: number; fila: number; nombre: string; apellido: string }>()
 
-      const tutor = await prisma.$transaction(async tx => {
-        const persona = await crearPersona(tx, {
-          ci, nombre, apellido,
-          email:    datos['Email']    ? String(datos['Email'])    : undefined,
-          telefono: datos['Telefono'] ? String(datos['Telefono']) : undefined,
-        })
-        const t = await tx.tutor.create({
-          data: {
-            personaId: persona.id,
-            ocupacion:        datos['Ocupacion']        ? String(datos['Ocupacion'])        : undefined,
-            gradoInstruccion: datos['GradoInstruccion']  ? String(datos['GradoInstruccion'])  : undefined,
-          },
-        })
-        if (estudiante) {
-          await tx.tutorEstudiante.create({
-            data: { tutorId: t.id, estudianteId: estudiante.id, parentesco: parentesco as any },
-          })
-        }
-        return t
-      })
+  const resultado = await ejecutarImport(filas, async ({ fila, datos }) => {
+    const r = createTutorSchema.safeParse({
+      ci:               texto(datos.CI),
+      nombre:           texto(datos.Nombre),
+      apellido:         texto(datos.Apellido),
+      ocupacion:        texto(datos.Ocupacion) || undefined,
+      gradoInstruccion: texto(datos.GradoInstruccion) || undefined,
+      email:            texto(datos.Email) || undefined,
+      telefono:         texto(datos.Telefono) || undefined,
+    })
+    if (!r.success) throw new ErrorDeUsuario(mensajeValidacion(r.error.issues))
+    const v = r.data
 
-      resultado.creados.push(tutor)
-      resultado.exitosas++
-    } catch (e) {
-      resultado.fallidas++
-      resultado.errores.push({ fila, error: e instanceof Error ? e.message : 'Error desconocido' })
+    // Estudiante a vincular (opcional)
+    const estudianteCi = texto(datos.EstudianteCI)
+    const parentescoTxt = texto(datos.Parentesco)
+    let estudianteId: number | null = null
+    let parentesco: ParentescoValido | null = null
+    if (estudianteCi) {
+      estudianteId = estudiantePorCi.get(estudianteCi) ?? null
+      if (estudianteId === null) throw new ErrorDeUsuario(`No se encontró un estudiante con CI ${estudianteCi}`)
+      if (!parentescoTxt) throw new ErrorDeUsuario('Parentesco es obligatorio cuando se indica EstudianteCI')
+      parentesco = normalizarParentesco(parentescoTxt)
     }
-  }
 
-  res.status(200).json(resultado)
+    // ¿Ya existe este tutor? (fila anterior del archivo, o registrado antes)
+    const previo = creadosAqui.get(v.ci)
+    const enBd   = personaPorCi.get(v.ci)
+    let tutorId: number | null = null
+    let referencia: { nombre: string; apellido: string } | null = null
+    if (previo) {
+      tutorId = previo.tutorId
+      referencia = previo
+    } else if (enBd) {
+      if (!enBd.tutor) throw new ErrorDeUsuario(`Ya existe una persona con CI ${v.ci} que no está registrada como tutor`)
+      tutorId = enBd.tutor.id
+      referencia = enBd
+    }
+
+    if (tutorId !== null && referencia) {
+      // Mismo CI con otro nombre casi seguro es un error de digitación: no se mezclan personas.
+      if (sinTildes(`${v.nombre} ${v.apellido}`) !== sinTildes(`${referencia.nombre} ${referencia.apellido}`)) {
+        throw new ErrorDeUsuario(`El CI ${v.ci} ya está registrado con otro nombre (${referencia.nombre} ${referencia.apellido})`)
+      }
+      if (estudianteId === null || parentesco === null) {
+        throw new ErrorDeUsuario(`Ya existe un tutor con CI ${v.ci}${previo ? ` (fila ${previo.fila})` : ''}. Para agregarle otro hijo indica EstudianteCI y Parentesco`)
+      }
+      const yaVinculado = await prisma.tutorEstudiante.findFirst({ where: { tutorId, estudianteId }, select: { tutorId: true } })
+      if (yaVinculado) throw new ErrorDeUsuario('Este tutor ya está vinculado a ese estudiante')
+      return prisma.tutorEstudiante.create({ data: { tutorId, estudianteId, parentesco } })
+    }
+
+    // Tutor nuevo
+    const tutor = await prisma.$transaction(async tx => {
+      const persona = await crearPersona(tx, {
+        ci: v.ci, nombre: v.nombre, apellido: v.apellido,
+        email: v.email ?? undefined, telefono: v.telefono ?? undefined,
+      })
+      const t = await tx.tutor.create({
+        data: {
+          personaId: persona.id,
+          ocupacion:        v.ocupacion ?? undefined,
+          gradoInstruccion: v.gradoInstruccion ?? undefined,
+        },
+      })
+      if (estudianteId !== null && parentesco !== null) {
+        await tx.tutorEstudiante.create({ data: { tutorId: t.id, estudianteId, parentesco } })
+      }
+      return t
+    })
+    creadosAqui.set(v.ci, { tutorId: tutor.id, fila, nombre: v.nombre, apellido: v.apellido })
+    return tutor
+  })
+
+  res.status(200).json({ ...resultado, advertencias })
 })
 
 // ─── GET /api/tutores/export ────────────────────────────────────────────────
@@ -369,10 +431,23 @@ export const exportTutores = asyncHandler(async (req: Request, res: Response): P
   res.send(buffer)
 })
 
-export const plantillaTutores = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+export const plantillaTutores = asyncHandler(async (_req: Request, res: Response): Promise<void> => {
   const columnas = ['CI', 'Nombre', 'Apellido', 'Ocupacion', 'GradoInstruccion', 'Email', 'Telefono', 'EstudianteCI', 'Parentesco']
   const ejemplo  = { CI: '5678901', Nombre: 'Rosa', Apellido: 'Quispe Mamani', Ocupacion: 'Comerciante', GradoInstruccion: 'Secundaria', Email: 'rquispe@correo.com', Telefono: '71234567', EstudianteCI: '4567890', Parentesco: 'MADRE' }
-  const buffer = await generarExcel('Plantilla', columnas, [ejemplo])
+  const buffer = await generarExcel('Plantilla', columnas, [ejemplo], {
+    columnasTexto: ['CI', 'Telefono', 'EstudianteCI'],
+    instrucciones: [
+      { columna: 'CI',               obligatoria: true,  descripcion: 'Cédula de identidad del tutor', ejemplo: '5678901' },
+      { columna: 'Nombre',           obligatoria: true,  descripcion: 'Nombres del tutor', ejemplo: 'Rosa' },
+      { columna: 'Apellido',         obligatoria: true,  descripcion: 'Apellidos del tutor', ejemplo: 'Quispe Mamani' },
+      { columna: 'Ocupacion',        obligatoria: false, descripcion: 'Ocupación', ejemplo: 'Comerciante' },
+      { columna: 'GradoInstruccion', obligatoria: false, descripcion: 'Grado de instrucción', ejemplo: 'Secundaria' },
+      { columna: 'Email',            obligatoria: false, descripcion: 'Correo electrónico', ejemplo: 'rquispe@correo.com' },
+      { columna: 'Telefono',         obligatoria: false, descripcion: 'Un solo número (dígitos, + - ( ) y espacios)', ejemplo: '71234567' },
+      { columna: 'EstudianteCI',     obligatoria: false, descripcion: 'CI de un estudiante YA registrado al que se vincula. Si el tutor tiene varios hijos, repite la fila con el mismo CI y otro EstudianteCI', ejemplo: '4567890' },
+      { columna: 'Parentesco',       obligatoria: false, descripcion: 'Obligatorio si hay EstudianteCI: PADRE, MADRE, ABUELO, ABUELA, TIO, TIA, HERMANO, HERMANA, TUTOR_LEGAL u OTRO', ejemplo: 'MADRE' },
+    ],
+  })
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', 'attachment; filename="plantilla_tutores.xlsx"')
   res.send(buffer)
