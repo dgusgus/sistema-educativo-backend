@@ -42,14 +42,24 @@ export const getDashboard = async (_req: Request, res: Response): Promise<void> 
       _count: true,
     })
 
+    // Se cuenta el dinero realmente recibido: también el de pagos PARCIALES (antes se
+    // ignoraba y el total recaudado quedaba por debajo de lo que había en caja).
     const totalRecaudado = await prisma.pago.aggregate({
-      where: { estado: 'PAGADO', inscripcion: { gestionId: gestion.id } },
+      where: { estado: { in: ['PAGADO', 'PARCIAL'] }, inscripcion: { gestionId: gestion.id } },
       _sum: { montoPagado: true },
     })
 
-    const pagosPendientes = await prisma.pago.count({
-      where: { estado: 'PENDIENTE', inscripcion: { gestionId: gestion.id } },
-    })
+    // "Pagos pendientes" = deudas (inscripción + concepto) con saldo: un pago parcial o una
+    // deuda registrada sin pagar. Se calcula por saldo, no por la etiqueta de cada fila.
+    const [{ n: pendientes }] = await prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM (
+        SELECT p."inscripcionId", p."conceptoPagoId"
+        FROM "Pago" p JOIN "Inscripcion" i ON i.id = p."inscripcionId"
+        WHERE i."gestionId" = ${gestion.id} AND p.estado <> 'ANULADO'
+        GROUP BY p."inscripcionId", p."conceptoPagoId"
+        HAVING max(p."montoOriginal") - sum(p.descuento) - sum(p."montoPagado") > 0
+      ) deudas`
+    const pagosPendientes = Number(pendientes)
 
     const trimestres = await prisma.trimestre.findMany({
       where: { gestionId: gestion.id },

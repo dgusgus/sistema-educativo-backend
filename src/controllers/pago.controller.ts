@@ -3,6 +3,7 @@ import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 import { Prisma } from '../../prisma/generated/prisma/client.js'
+import { aCentavos, calcularDeuda, recalcularEstadosDeuda } from '../lib/pago.helper.js'
 
 const METODOS_PAGO = ['EFECTIVO', 'TRANSFERENCIA', 'QR'] as const
 type MetodoPagoValido = typeof METODOS_PAGO[number]
@@ -101,36 +102,43 @@ export const getPagosByInscripcion = async (req: Request, res: Response): Promis
       orderBy: { fechaPago: 'desc' },
     })
 
+    // La deuda de cada concepto suma TODOS sus abonos (antes solo se miraba el primer pago PAGADO,
+    // así un pago parcial nunca se veía y el concepto seguía "pendiente" con 0 pagado).
     const estadoPorConcepto = conceptos.map(concepto => {
-      const pagoValido = pagos.find(p => p.conceptoPagoId === concepto.id && p.estado === 'PAGADO')
-      const pagosAnulados = pagos.filter(p => p.conceptoPagoId === concepto.id && p.estado === 'ANULADO')
+      const delConcepto   = pagos.filter(p => p.conceptoPagoId === concepto.id)
+      const deuda         = calcularDeuda(concepto.monto, [...delConcepto].sort((a, b) => a.id - b.id))
+      const abonos        = delConcepto.filter(p => p.estado !== 'ANULADO' && aCentavos(p.montoPagado) > 0).sort((a, b) => b.id - a.id)
+      const pagosAnulados = delConcepto.filter(p => p.estado === 'ANULADO')
 
       return {
         concepto: { id: concepto.id, nombre: concepto.nombre, monto: concepto.monto },
-        obligatorio: concepto.obligatorio,
-        estado:      pagoValido ? 'PAGADO' : 'PENDIENTE',
-        montoPagado: pagoValido?.montoPagado ?? 0,
-        fechaPago:   pagoValido?.fechaPago ?? null,
-        numeroRecibo: pagoValido?.numeroRecibo ?? null,
+        obligatorio:  concepto.obligatorio,
+        estado:       deuda.estado,            // PAGADO | PARCIAL | PENDIENTE
+        montoPagado:  deuda.pagado,            // total abonado
+        descuento:    deuda.descuento,
+        saldo:        deuda.saldo,             // lo que falta de ESTE concepto (ya descontado)
+        abonos:       deuda.abonos,
+        fechaPago:    abonos[0]?.fechaPago ?? null,        // del último abono
+        numeroRecibo: abonos[0]?.numeroRecibo ?? null,
         pagosAnulados: pagosAnulados.length,
       }
     })
 
-    const totalRequerido = conceptos
-      .filter(c => c.obligatorio)
-      .reduce((sum, c) => sum + Number(c.monto), 0)
-
-    const totalPagado = estadoPorConcepto
-      .filter(e => e.estado === 'PAGADO')
-      .reduce((sum, e) => sum + Number(e.montoPagado), 0)
+    // Solo cuentan los conceptos OBLIGATORIOS (antes totalPagado sumaba también los opcionales:
+    // pagar un uniforme opcional podía marcar "al día" a quien no pagó la matrícula) y el saldo
+    // respeta los descuentos (antes un alumno con descuento figuraba con deuda para siempre).
+    const obligatorios   = estadoPorConcepto.filter(e => e.obligatorio)
+    const totalRequerido = obligatorios.reduce((sum, e) => sum + Number(e.concepto.monto), 0)
+    const totalPagado    = obligatorios.reduce((sum, e) => sum + e.montoPagado, 0)
+    const saldoTotal     = obligatorios.reduce((sum, e) => sum + e.saldo, 0)
 
     res.status(200).json({
       inscripcion: { ...inscripcion, estudiante: aplanarPersona(inscripcion.estudiante) },
       resumen: {
         totalRequerido,
         totalPagado,
-        saldo: totalRequerido - totalPagado,
-        alDia: totalRequerido <= totalPagado,
+        saldo: saldoTotal,
+        alDia: saldoTotal <= 0,
       },
       estadoPorConcepto,
       historialPagos: pagos,
@@ -151,7 +159,7 @@ export const getPagosByInscripcion = async (req: Request, res: Response): Promis
 //  Ahora el candado hace que los cobros se procesen de a uno: la comprobación,
 //  el número de recibo y la creación ocurren como un solo paso indivisible.
 type ResultadoPago =
-  | { ok: true; pago: Prisma.PagoGetPayload<{ include: {
+  | { ok: true; saldoPendiente: number; pago: Prisma.PagoGetPayload<{ include: {
       conceptoPago: { select: { nombre: true; monto: true } }
       inscripcion:  { include: { estudiante: { select: { persona: { select: { nombre: true; apellido: true } } } } } }
     } }> }
@@ -229,17 +237,35 @@ export const registrarPago = async (req: Request, res: Response): Promise<void> 
       // Se libera solo al terminar la transacción.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LOCK_REGISTRO_PAGOS})`
 
-      const pagoExistente = await tx.pago.findFirst({
-        where: { inscripcionId, conceptoPagoId, estado: 'PAGADO' },
+      // Deuda actual de este concepto (todos los abonos NO anulados)
+      const previos = await tx.pago.findMany({
+        where:   { inscripcionId, conceptoPagoId, estado: { not: 'ANULADO' } },
+        orderBy: { id: 'asc' },
       })
-      if (pagoExistente) {
+      const antes = calcularDeuda(conceptoPago.monto, previos)
+
+      if (antes.estado === 'PAGADO') {
+        const ultimo = [...previos].reverse().find(p => aCentavos(p.montoPagado) > 0)
         return {
           ok: false,
           status: 409,
           body: {
-            error: 'Ya existe un pago activo para este concepto',
-            sugerencia: 'Si deseas reemplazarlo, primero anula el pago existente',
-            pagoExistente: { id: pagoExistente.id, numeroRecibo: pagoExistente.numeroRecibo },
+            error: 'Este concepto ya está pagado por completo',
+            sugerencia: 'Si el pago fue un error, anúlalo primero y vuelve a registrarlo',
+            pagoExistente: ultimo ? { id: ultimo.id, numeroRecibo: ultimo.numeroRecibo } : null,
+          },
+        }
+      }
+
+      // El abono no puede superar lo que falta por pagar
+      const saldoDespues = aCentavos(antes.saldo) - aCentavos(desc) - aCentavos(monto)
+      if (saldoDespues < 0) {
+        return {
+          ok: false,
+          status: 400,
+          body: {
+            error: `El monto excede el saldo pendiente de este concepto (Bs. ${antes.saldo.toFixed(2)})`,
+            saldoPendiente: antes.saldo,
           },
         }
       }
@@ -259,11 +285,12 @@ export const registrarPago = async (req: Request, res: Response): Promise<void> 
         data: {
           inscripcionId,
           conceptoPagoId,
-          montoOriginal:   conceptoPago.monto,
+          // Monto de referencia de la deuda: el del primer pago real (no cambia si luego editan el concepto)
+          montoOriginal:   antes.abonos > 0 ? antes.montoOriginal : conceptoPago.monto,
           descuento:       desc,
           montoPagado:     monto,
           metodoPago:      (metodoPago as MetodoPagoValido | undefined) ?? 'EFECTIVO',
-          estado:          'PAGADO',
+          estado:          saldoDespues === 0 ? 'PAGADO' : 'PARCIAL',
           numeroRecibo,
           observaciones,
           registradoPorId: req.user?.id,
@@ -273,7 +300,9 @@ export const registrarPago = async (req: Request, res: Response): Promise<void> 
           inscripcion:  { include: { estudiante: { select: { persona: { select: { nombre: true, apellido: true } } } } } },
         },
       })
-      return { ok: true, pago }
+      // Si este abono cerró la deuda, los abonos anteriores (PARCIAL) pasan a PAGADO
+      await recalcularEstadosDeuda(tx, inscripcionId, conceptoPagoId, conceptoPago.monto)
+      return { ok: true, pago, saldoPendiente: saldoDespues / 100 }
     }, { timeout: 10_000 })
 
     if (!resultado.ok) {
@@ -281,8 +310,8 @@ export const registrarPago = async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    const { pago } = resultado
-    res.status(201).json({ ...pago, inscripcion: { ...pago.inscripcion, estudiante: aplanarPersona(pago.inscripcion.estudiante) } })
+    const { pago, saldoPendiente } = resultado
+    res.status(201).json({ ...pago, saldoPendiente, inscripcion: { ...pago.inscripcion, estudiante: aplanarPersona(pago.inscripcion.estudiante) } })
   } catch (error) {
     console.error('[pago.registrarPago]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -318,12 +347,21 @@ export const anularPago = async (req: Request, res: Response): Promise<void> => 
     const nota   = `ANULADO por ${req.user!.username} el ${fecha}: ${motivo}`
     const textoNuevo = pago.observaciones ? `${pago.observaciones} | ${nota}` : nota
 
-    // Condicional y atómico: si dos personas anulan a la vez, solo una gana.
-    const { count } = await prisma.pago.updateMany({
-      where: { id, estado: { not: 'ANULADO' } },
-      data:  { estado: 'ANULADO', observaciones: textoNuevo },
-    })
-    if (count === 0) {
+    // Mismo candado que registrarPago: anular y recalcular no pueden cruzarse con un cobro.
+    // Condicional y atómico: si dos personas anulan a la vez, solo una gana. Al anular un
+    // abono, los demás se recalculan (p. ej. el que cerraba la deuda → vuelve a PARCIAL).
+    const anulado0 = await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LOCK_REGISTRO_PAGOS})`
+      const { count } = await tx.pago.updateMany({
+        where: { id, estado: { not: 'ANULADO' } },
+        data:  { estado: 'ANULADO', observaciones: textoNuevo },
+      })
+      if (count === 0) return false
+      const concepto = await tx.conceptoPago.findUnique({ where: { id: pago.conceptoPagoId }, select: { monto: true } })
+      await recalcularEstadosDeuda(tx, pago.inscripcionId, pago.conceptoPagoId, concepto?.monto ?? pago.montoOriginal)
+      return true
+    }, { timeout: 10_000 })
+    if (!anulado0) {
       res.status(400).json({ error: 'El pago ya está anulado' })
       return
     }

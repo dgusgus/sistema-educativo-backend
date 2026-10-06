@@ -1,41 +1,79 @@
 // prisma/seed.ts
-// Semilla ROBUSTA de simulación (schema v6) — colegio completo ficticio:
+// Semilla de DEMO / desarrollo — colegio completo ficticio (schema v6):
 //
 //   12 cursos (1°-6° x A/B, SECUNDARIA) x 6 estudiantes = 72 activos
-//   + Miguel (RETIRADO, caso de prueba heredado) = 73 inscripciones 2025
+//   + Miguel (RETIRADO, caso de prueba heredado) = 73 inscripciones
 //   ~66 tutores (mayoría 1:1, 6 compartidos + tutora multi-rol)
 //   11 docentes (9 enseñando + 1 libre + 1 tutora-docente sin carga)
-//   9 materias (8 asignadas + QUECHUA libre a propósito → alerta dashboard)
-//   Trimestres MENSUALES 2025: T1=junio, T2=julio, T3=agosto (T1+T2 cerrados,
-//   T3 abierto al ~85% → pendientes con nombres + cierre manual como prueba)
-//   Gestión 2026 creada INACTIVA (T1=sep, T2=oct, T3=nov 2025, vacía) para
-//   probar promoción / propuesta de inscripciones / activación.
+//   9 materias en 4 campos de saber (8 asignadas + QUECHUA libre → alerta dashboard)
+//   Horarios completos y sin choques en 4 cursos (1°A, 1°B, 2°A, 2°B)
+//   Trimestres MENSUALES anclados a "hoy": T1 y T2 cerrados, T3 = el mes en curso
+//   (abierto, ~85% calificado → pendientes con nombres + cierre manual como prueba).
+//   Gestión siguiente creada INACTIVA y vacía para probar promoción / activación.
 //
-// Decisiones de performance (esto es ~25.000 filas):
+// FECHAS: todo se calcula respecto a una ANCLA (por defecto, la fecha de HOY), así el
+// dashboard se ve "vivo" (el trimestre abierto incluye hoy, nada aparece como vencido).
+// Para reproducir EXACTAMENTE el dataset fijo de siempre (gestión 2025):
+//     SEED_ANCLA=2025-08-31 pnpm db:seed
+// Las fechas se arman en UTC: el resultado es el mismo en cualquier zona horaria
+// (antes, en una máquina al este de UTC toda la asistencia se corría un día atrás).
+//
+// SEGURIDAD:
+//   • Se NIEGA a correr con NODE_ENV=production (salvo SEED_PERMITIR_PRODUCCION=si,
+//     p. ej. un demo público: en ese caso use SEED_PASSWORD_DEMO para no dejar las
+//     contraseñas por defecto).
+//   • Se NIEGA a mezclarse con una base que ya tiene datos reales (SEED_FORZAR=si lo omite)
+//     o con datos de otra gestión: use `pnpm prisma migrate reset`.
+//   • Si algo falla, sale con código 1 (antes salía con 0 y parecía exitoso).
+//   • Para un servidor REAL use seed.produccion.ts (solo crea el director inicial).
+//
+// Decisiones de performance (~26.000 filas, ~15 s):
 //   - bcrypt se calcula UNA vez por contraseña y se reutiliza el hash.
 //   - Catálogos con upsert (re-ejecutable); bulk (notas/asistencias) con
 //     createMany + guarda `count > 0 → skip` (no duplican al re-ejecutar).
-//   - Sin recalcularCalificacion(): el seed usa UNA actividad por dimensión
-//     (peso 1), así el promedio es directo y exacto (ver notaEnDimension):
+//   - Sin recalcularCalificacion(): una actividad por dimensión (peso 1), así el
+//     promedio es directo y exacto (misma matemática que src/lib/calificacion.helper.ts):
 //       promedioDim  = fraccion x puntajeMaximo(dimension)
 //       promedioTrim = fraccion x 100  (pesos suman 1)
-//     Misma matemática que src/lib/calificacion.helper.ts, sin 15k queries.
+//   - Asistencia: % = (presentes + justificados) / total, igual que la aplicación.
 //   - PromedioFinal NO se siembra: nace al cerrar T3 (es la prueba estrella).
 //
-// Ejecutar contra BD LIMPIA: pnpm prisma migrate reset --force (corre el
-// seed solo) o pnpm db:seed. Re-ejecutar es seguro (upserts + guards).
-// SOLO dev — nunca contra producción.
+// Ejecutar contra BD LIMPIA: pnpm prisma migrate reset --force (corre el seed solo)
+// o pnpm db:seed. Re-ejecutar el mismo día es seguro (upserts + guards).
 
+import 'dotenv/config'
 import bcrypt from 'bcryptjs'
 import { PrismaClient } from './generated/prisma/client.js'
 import { PrismaPg } from '@prisma/adapter-pg'
+import { sembrarCatalogo, MATERIAS } from './seed.catalogo.js'
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL ?? '' })
+// ─── Guardas ANTES de abrir la conexión ──────────────────────────────────────
+if (process.env.NODE_ENV === 'production' && process.env.SEED_PERMITIR_PRODUCCION !== 'si') {
+  console.error('❌ Este seed es de DEMO y se niega a correr con NODE_ENV=production.')
+  console.error('   Para un servidor real use prisma/seed.produccion.ts (pnpm db:seed:prod).')
+  console.error('   Si de verdad quiere un demo público: SEED_PERMITIR_PRODUCCION=si y SEED_PASSWORD_DEMO=<clave>.')
+  process.exit(1)
+}
+if (!process.env.DATABASE_URL) {
+  console.error('❌ Falta DATABASE_URL (defínela en el archivo .env).')
+  process.exit(1)
+}
+
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL })
 const prisma  = new PrismaClient({ adapter })
 
 // ─── Hashes calculados una sola vez ──────────────────────────────────────────
+// Por defecto, las contraseñas de demo de siempre (el panel de pruebas del login las muestra
+// SOLO en desarrollo). Con SEED_PASSWORD_DEMO TODAS las cuentas usan esa clave (demo público).
+const PASS_DEMO = (process.env.SEED_PASSWORD_DEMO ?? '').trim()
 let HASH: Record<string, string>
 async function initHash() {
+  if (PASS_DEMO) {
+    if (PASS_DEMO.length < 8) throw new Error('SEED_PASSWORD_DEMO debe tener al menos 8 caracteres')
+    const h = await bcrypt.hash(PASS_DEMO, 10)
+    HASH = { admin: h, sec: h, doc: h, est: h, tut: h }
+    return
+  }
   const [admin, sec, doc, est, tut] = await Promise.all(
     ['admin1234', 'sec1234', 'doc1234', 'est1234', 'tut1234'].map(p => bcrypt.hash(p, 4))
   )
@@ -43,12 +81,45 @@ async function initHash() {
 }
 
 // ─── Utilidades deterministas (mismo seed → mismos datos) ────────────────────
-const diasHabiles = (anio: number, mes: number): Date[] => {
+// ANCLA = "hoy" de la simulación (día de calendario). Todo el calendario sale de aquí.
+function parseAncla(v?: string): Date {
+  if (v) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v.trim())
+    if (!m) throw new Error(`SEED_ANCLA inválida ("${v}"): usa AAAA-MM-DD`)
+    return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])))
+  }
+  const h = new Date()   // el día de calendario LOCAL de quien ejecuta, como medianoche UTC
+  return new Date(Date.UTC(h.getFullYear(), h.getMonth(), h.getDate()))
+}
+const ANCLA = parseAncla(process.env.SEED_ANCLA)
+const ANIO  = ANCLA.getUTCFullYear()
+
+// Todas las fechas se construyen con Date.UTC: new Date(año, mes, día) usa la hora LOCAL y,
+// en una zona al este de UTC, la columna DATE quedaba un día antes (asistencia en domingo).
+const utc = (y: number, m: number, d: number): Date => new Date(Date.UTC(y, m - 1, d))
+const ultimoDia = (y: number, m: number): number => new Date(Date.UTC(y, m, 0)).getUTCDate()
+const mesRel = (delta: number): { y: number; m: number } => {
+  const d = new Date(Date.UTC(ANCLA.getUTCFullYear(), ANCLA.getUTCMonth() + delta, 1))
+  return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 }
+}
+// Trimestres mensuales: T3 = mes de la ancla, T2 = el anterior, T1 = el anterior a ese.
+const PER: Record<1 | 2 | 3, { y: number; m: number }> = { 1: mesRel(-2), 2: mesRel(-1), 3: mesRel(0) }
+const SIG = [mesRel(1), mesRel(2), mesRel(3)]   // gestión siguiente (inactiva)
+// En el trimestre abierto (T3) no hay fechas posteriores a la ancla.
+const fechaTrim = (n: 1 | 2 | 3, dia: number): Date => utc(PER[n].y, PER[n].m, n === 3 ? Math.min(dia, ANCLA.getUTCDate()) : dia)
+const primerDiaHabil = (y: number, m: number): Date => {
+  let d = 1
+  while ([0, 6].includes(utc(y, m, d).getUTCDay())) d++
+  return utc(y, m, d)
+}
+const INSCRIPCION = primerDiaHabil(PER[1].y, PER[1].m)
+
+// Días hábiles (lun-vie) del mes, sin pasar de `hasta` (no hay asistencia del futuro).
+const diasHabiles = (y: number, m: number, hasta: Date): Date[] => {
   const dias: Date[] = []
-  const n = new Date(anio, mes, 0).getDate()
-  for (let d = 1; d <= n; d++) {
-    const f = new Date(anio, mes - 1, d)
-    if (f.getDay() >= 1 && f.getDay() <= 5) dias.push(f)
+  for (let d = 1; d <= ultimoDia(y, m); d++) {
+    const f = utc(y, m, d)
+    if (f.getUTCDay() >= 1 && f.getUTCDay() <= 5 && f.getTime() <= hasta.getTime()) dias.push(f)
   }
   return dias
 }
@@ -69,6 +140,7 @@ const NOMBRES = ['Diego', 'Camila', 'Santiago', 'Fernanda', 'Mateo', 'Paola', 'A
 const APELLIDOS = ['Condori', 'Mamani', 'Quispe', 'Flores', 'Tarqui', 'Huanca', 'Choque', 'Apaza', 'Ticona', 'Cruz', 'Ramos', 'Vargas', 'Torres', 'Choquehuanca', 'Paco', 'Limachi']
 const OCUPACIONES = ['Comerciante', 'Chofer', 'Costurera', 'Albañil', 'Enfermera', 'Agricultor', 'Artesana', 'Mecánico']
 const CALLES = ['Av. Pagador', 'Calle Bolívar', 'Av. Cívica', 'Zona Los Ángeles', 'Urb. Bustillos', 'Calle Junín', 'Av. España', 'Zona Norte']
+const MOTIVOS_JUSTIFICACION = ['Certificado médico', 'Permiso familiar', 'Trámite de documentos', 'Cita de control']
 
 // ─── Estudiantes base heredados (casos de prueba del seed anterior) ──────────
 const BASE_1A = [
@@ -81,44 +153,59 @@ const BASE_1B = [
 ]
 const MIGUEL = { username: 'est_miguel', ci: 'E004', nombre: 'Miguel', apellido: 'Mamani Choque' }
 
+// Evita mezclar la demo con datos reales o con otra gestión (dos gestiones "activas" rompen la app).
+async function protegerBaseDeDatos() {
+  const personas = await prisma.persona.count()
+  const esDemo = (await prisma.persona.findUnique({ where: { ci: 'D001' } })) !== null
+  if (personas > 0 && !esDemo && process.env.SEED_FORZAR !== 'si') {
+    throw new Error(
+      `La base ya tiene ${personas} personas que NO son de esta demo. Este seed es solo para bases de demo ` +
+      '(use `pnpm prisma migrate reset` para vaciarla, o SEED_FORZAR=si bajo su responsabilidad).'
+    )
+  }
+  // La app asume UNA gestión activa. Si ya hay una activa de otro año (p. ej. se sembró con otra
+  // ancla), correr esto dejaría dos activas a la vez.
+  const activa = await prisma.gestion.findFirst({ where: { activa: true }, select: { anio: true } })
+  if (activa && activa.anio !== ANIO) {
+    throw new Error(
+      `La base ya tiene la gestión ${activa.anio} activa y esta demo activaría la ${ANIO}. ` +
+      'Use `pnpm prisma migrate reset` para empezar de cero, o fije la misma fecha de antes con SEED_ANCLA=AAAA-MM-DD.'
+    )
+  }
+}
+
 async function main() {
-  console.log('🌱 Seed robusta 2025 + 2026 (colegio completo ficticio)...\n')
+  const ancla = ANCLA.toISOString().slice(0, 10)
+  console.log(`🌱 Seed de DEMO — gestión ${ANIO} (ancla ${ancla}${process.env.SEED_ANCLA ? '' : ' = hoy'}): colegio completo ficticio...\n`)
+  await protegerBaseDeDatos()
   await initHash()
 
   // ══════════════════════════════════════
   // INSTITUCIÓN
   // ══════════════════════════════════════
-  await prisma.institucion.upsert({
-    where: { id: 1 }, update: {},
-    create: {
-      id: 1, nombre: 'Unidad Educativa "Los Ángeles de Nazaria Ignacia"',
-      direccion: 'Urbanización Bustillos, Zona Los Ángeles', telefono: '(052) 123456',
-      email: 'ue.angeles.nazaria@gmail.com', rue: '81230370',
-      municipio: 'Oruro', departamento: 'Oruro', dependencia: 'FISCAL',
-    },
-  })
-  console.log('✓ Institución')
+  const catalogo = await sembrarCatalogo(prisma)
+  console.log('✓ Institución y 4 campos de saber')
 
   // ══════════════════════════════════════
   // GESTIONES 2025 (activa, mensual) y 2026 (inactiva, vacía)
   // ══════════════════════════════════════
-  const g25 = await prisma.gestion.upsert({
-    where: { anio: 2025 }, update: { activa: true },
+  const gAct = await prisma.gestion.upsert({
+    where: { anio: ANIO }, update: { activa: true },
     create: {
-      anio: 2025, descripcion: 'Gestión Escolar 2025 (simulación mensual)', activa: true,
-      fechaInicio: new Date('2025-06-01'), fechaFin: new Date('2025-08-31'),
+      anio: ANIO, descripcion: `Gestión Escolar ${ANIO} (simulación mensual)`, activa: true,
+      fechaInicio: utc(PER[1].y, PER[1].m, 1), fechaFin: utc(PER[3].y, PER[3].m, ultimoDia(PER[3].y, PER[3].m)),
       notaMinimaAprobacion: 51,
     },
   })
-  const g26 = await prisma.gestion.upsert({
-    where: { anio: 2026 }, update: {},
+  const gSig = await prisma.gestion.upsert({
+    where: { anio: ANIO + 1 }, update: {},
     create: {
-      anio: 2026, descripcion: 'Gestión Escolar 2026 (lista para promoción)', activa: false,
-      fechaInicio: new Date('2025-09-01'), fechaFin: new Date('2025-11-30'),
+      anio: ANIO + 1, descripcion: `Gestión Escolar ${ANIO + 1} (lista para promoción)`, activa: false,
+      fechaInicio: utc(SIG[0].y, SIG[0].m, 1), fechaFin: utc(SIG[2].y, SIG[2].m, ultimoDia(SIG[2].y, SIG[2].m)),
       notaMinimaAprobacion: 51,
     },
   })
-  console.log('✓ Gestiones 2025 (activa) y 2026 (inactiva)')
+  console.log(`✓ Gestiones ${ANIO} (activa) y ${ANIO + 1} (inactiva)`)
 
   // ══════════════════════════════════════
   // DIMENSIONES (ambas gestiones, pesos = 100%)
@@ -129,45 +216,47 @@ async function main() {
     { nombre: 'Hacer',   puntajeMaximo: 40, pesoEnPromedio: 0.40, orden: 3, esAutoevaluada: false },
     { nombre: 'Decidir', puntajeMaximo: 10, pesoEnPromedio: 0.10, orden: 4, esAutoevaluada: false },
   ]
-  const dims25: Record<string, { id: number; puntajeMaximo: unknown }> = {}
-  for (const g of [g25, g26]) {
+  const dimsAct: Record<string, { id: number; puntajeMaximo: unknown }> = {}
+  for (const g of [gAct, gSig]) {
     for (const d of dimDatos) {
       const dim = await prisma.dimensionEvaluacion.upsert({
         where: { gestionId_nombre: { gestionId: g.id, nombre: d.nombre } },
         update: {}, create: { gestionId: g.id, ...d },
       })
-      if (g.id === g25.id) dims25[d.nombre] = dim
+      if (g.id === gAct.id) dimsAct[d.nombre] = dim
     }
   }
-  console.log('✓ Dimensiones Ser/Saber/Hacer/Decidir (2025 y 2026)')
+  console.log('✓ Dimensiones Ser/Saber/Hacer/Decidir (ambas gestiones)')
 
   // ══════════════════════════════════════
   // TRIMESTRES MENSUALES — T1+T2 cerrados, T3 abierto; 2026 vacía
   // ══════════════════════════════════════
-  const trimDefs: Record<number, Array<[number, string, string, string, boolean]>> = {
-    [g25.id]: [
-      [1, 'Primer Trimestre',  '2025-06-01', '2025-06-30', true],
-      [2, 'Segundo Trimestre', '2025-07-01', '2025-07-31', true],
-      [3, 'Tercer Trimestre',  '2025-08-01', '2025-08-31', false],
+  const mesCompleto = (p: { y: number; m: number }): [Date, Date] => [utc(p.y, p.m, 1), utc(p.y, p.m, ultimoDia(p.y, p.m))]
+  const trimDefs: Record<number, Array<[number, string, Date, Date, boolean]>> = {
+    [gAct.id]: [
+      [1, 'Primer Trimestre',  ...mesCompleto(PER[1]), true],
+      [2, 'Segundo Trimestre', ...mesCompleto(PER[2]), true],
+      [3, 'Tercer Trimestre',  ...mesCompleto(PER[3]), false],
     ],
-    [g26.id]: [
-      [1, 'Primer Trimestre',  '2025-09-01', '2025-09-30', false],
-      [2, 'Segundo Trimestre', '2025-10-01', '2025-10-31', false],
-      [3, 'Tercer Trimestre',  '2025-11-01', '2025-11-30', false],
+    [gSig.id]: [
+      [1, 'Primer Trimestre',  ...mesCompleto(SIG[0]), false],
+      [2, 'Segundo Trimestre', ...mesCompleto(SIG[1]), false],
+      [3, 'Tercer Trimestre',  ...mesCompleto(SIG[2]), false],
     ],
   }
-  const trims25: Record<number, { id: number }> = {}
+  const trimsAct: Record<number, { id: number }> = {}
   for (const [gid, defs] of Object.entries(trimDefs)) {
     for (const [num, nombre, ini, fin, cerrado] of defs) {
       const t = await prisma.trimestre.upsert({
         where: { numero_gestionId: { numero: num, gestionId: Number(gid) } },
         update: { cerrado },
-        create: { numero: num, nombre, gestionId: Number(gid), fechaInicio: new Date(ini), fechaFin: new Date(fin), cerrado },
+        create: { numero: num, nombre, gestionId: Number(gid), fechaInicio: ini, fechaFin: fin, cerrado },
       })
-      if (Number(gid) === g25.id) trims25[num] = t
+      if (Number(gid) === gAct.id) trimsAct[num] = t
     }
   }
-  console.log('✓ Trimestres mensuales (T1+T2 cerrados, T3 abierto; 2026 vacía)')
+  const trimNumPorId: Record<number, 1 | 2 | 3> = { [trimsAct[1].id]: 1, [trimsAct[2].id]: 2, [trimsAct[3].id]: 3 }
+  console.log('✓ Trimestres mensuales (T1+T2 cerrados, T3 = mes en curso y abierto; gestión siguiente vacía)')
 
   // ══════════════════════════════════════
   // CURSOS 1°-6° x A/B (2025) — tutor = docente rotativo (ver asignaciones)
@@ -177,9 +266,9 @@ async function main() {
   for (let grado = 1; grado <= 6; grado++) {
     for (const paralelo of ['A', 'B']) {
       const c = await prisma.curso.upsert({
-        where: { nivel_grado_paralelo_turno_gestionId: { nivel: 'SECUNDARIA', grado, paralelo, turno: 'MANANA', gestionId: g25.id } },
+        where: { nivel_grado_paralelo_turno_gestionId: { nivel: 'SECUNDARIA', grado, paralelo, turno: 'MANANA', gestionId: gAct.id } },
         update: {},
-        create: { nivel: 'SECUNDARIA', grado, paralelo, turno: 'MANANA', capacidad: 30, gestionId: g25.id },
+        create: { nivel: 'SECUNDARIA', grado, paralelo, turno: 'MANANA', capacidad: 30, gestionId: gAct.id },
       })
       cursos.push({ id: c.id, grado, paralelo })
     }
@@ -189,17 +278,10 @@ async function main() {
   // ══════════════════════════════════════
   // MATERIAS (8 asignadas + QUECHUA libre → alerta dashboard)
   // ══════════════════════════════════════
-  const matDefs: Array<[string, string, number]> = [
-    ['MAT', 'Matemáticas', 5], ['LEN', 'Lenguaje', 5], ['CNA', 'Ciencias Naturales', 4],
-    ['CSO', 'Ciencias Sociales', 4], ['ING', 'Inglés', 3], ['EFI', 'Educación Física', 3],
-    ['ART', 'Artes Plásticas', 2], ['TEC', 'Técnica Tecnológica', 3], ['QUE', 'Lengua Originaria (Quechua)', 2],
-  ]
-  const materias: Record<string, { id: number }> = {}
-  for (const [codigo, nombre, hs] of matDefs) {
-    materias[codigo] = await prisma.materia.upsert({ where: { codigo }, update: {}, create: { nombre, codigo, horasSemanales: hs } })
-  }
+  const materias = catalogo.materias
   const MATS_ASIGNADAS = ['MAT', 'LEN', 'CNA', 'CSO', 'ING', 'EFI', 'ART', 'TEC']
-  console.log('✓ 9 materias (QUECHUA sin asignar a propósito)')
+  const HORAS: Record<string, number> = Object.fromEntries(MATERIAS.map(m => [m.codigo, m.horas]))
+  console.log('✓ 9 materias con campo de saber (QUECHUA sin asignar a propósito)')
 
   // ══════════════════════════════════════
   // USUARIOS base (cartel intacto) + DOCENTES nuevos
@@ -237,7 +319,7 @@ async function main() {
     where: { personaId: pDirector.id }, update: {},
     create: { personaId: pDirector.id, usuarioId: U.director.id, activo: true },
   })
-  await prisma.gestion.update({ where: { id: g25.id }, data: { directorId: director.id } })
+  await prisma.gestion.update({ where: { id: gAct.id }, data: { directorId: director.id } })
   const pSec = await crearPersona({ ci: 'S001', nombre: 'Carmen', apellido: 'Flores Quispe', telefono: '72000001', email: 'c.flores@ue-angeles.edu.bo' })
   await prisma.secretaria.upsert({ where: { personaId: pSec.id }, update: {}, create: { personaId: pSec.id, usuarioId: U.secretaria.id, activo: true } })
 
@@ -290,21 +372,75 @@ async function main() {
   // ASIGNACIONES DMC: 12 cursos x 8 materias, rotando 9 docentes
   // ══════════════════════════════════════
   const poolDocentes = ['doc_mamani', 'doc_quispe', 'doc_flores', 'doc_condori', 'doc_rios', 'doc_paredes', 'doc_soto', 'doc_aliaga', 'director']
-  const dmcs: Array<{ id: number; cursoIdx: number; materia: string }> = []
+  const dmcs: Array<{ id: number; cursoIdx: number; materia: string; docenteId: number }> = []
   for (let ci = 0; ci < cursos.length; ci++) {
     for (let k = 0; k < MATS_ASIGNADAS.length; k++) {
       const du = poolDocentes[(ci + k) % poolDocentes.length]
       const dmc = await prisma.docenteMateriaCurso.upsert({
-        where: { docenteId_materiaId_cursoId_gestionId: { docenteId: docentes[du].id, materiaId: materias[MATS_ASIGNADAS[k]].id, cursoId: cursos[ci].id, gestionId: g25.id } },
+        where: { docenteId_materiaId_cursoId_gestionId: { docenteId: docentes[du].id, materiaId: materias[MATS_ASIGNADAS[k]].id, cursoId: cursos[ci].id, gestionId: gAct.id } },
         update: {},
-        create: { docenteId: docentes[du].id, materiaId: materias[MATS_ASIGNADAS[k]].id, cursoId: cursos[ci].id, gestionId: g25.id },
+        create: { docenteId: docentes[du].id, materiaId: materias[MATS_ASIGNADAS[k]].id, cursoId: cursos[ci].id, gestionId: gAct.id },
       })
-      dmcs.push({ id: dmc.id, cursoIdx: ci, materia: MATS_ASIGNADAS[k] })
+      dmcs.push({ id: dmc.id, cursoIdx: ci, materia: MATS_ASIGNADAS[k], docenteId: docentes[du].id })
     }
     // Tutor del curso = primer docente rotado (para el explorador del dashboard)
     await prisma.curso.update({ where: { id: cursos[ci].id }, data: { tutorDocenteId: docentes[poolDocentes[ci % poolDocentes.length]].id } })
   }
   console.log(`✓ ${dmcs.length} asignaciones (96 DMC) + tutores de curso`)
+
+  // ══════════════════════════════════════
+  // HORARIOS: 4 cursos (1°A, 1°B, 2°A, 2°B) completos y SIN choques de docente ni de curso
+  // ══════════════════════════════════════
+  // Un horario de los 12 cursos es imposible con 9 docentes: 12 cursos x 29 h = 348 h/semana
+  // y 9 docentes x 30 períodos = 270. Con 4 cursos son 116 h y ningún docente pasa de ~18 h.
+  const CURSOS_CON_HORARIO = [0, 1, 2, 3]
+  const HORAS_SEMANA = MATS_ASIGNADAS.reduce((t, c) => t + HORAS[c], 0)
+  if ((await prisma.horario.count()) === 0) {
+    const PERIODOS: Array<[string, string]> = [['08:00', '08:45'], ['08:45', '09:30'], ['09:30', '10:15'], ['10:30', '11:15'], ['11:15', '12:00'], ['12:00', '12:45']]
+    const DIAS = ['LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES'] as const
+    const hora = (hhmm: string) => new Date(`1970-01-01T${hhmm}:00.000Z`)
+    const docenteOcupado = new Set<string>()
+    const bloques: Array<{ docenteMateriaCursoId: number; diaSemana: (typeof DIAS)[number]; horaInicio: Date; horaFin: Date; aula: string }> = []
+
+    for (const ci of CURSOS_CON_HORARIO) {
+      const pend = MATS_ASIGNADAS.map(cod => ({
+        dmc: dmcs.find(d => d.cursoIdx === ci && d.materia === cod)!,
+        restante: HORAS[cod],
+        porDia: new Map<number, number>(),
+      }))
+      const slotLleno = new Set<string>()
+      // Recorre período x día; en cada hueco pone la materia con más horas pendientes cuyo
+      // docente esté libre. 1.ª pasada: máx. 2 horas de una materia por día; 2.ª: sin ese límite.
+      const colocar = (maxPorDia: number) => {
+        for (let p = 0; p < PERIODOS.length; p++) {
+          for (let d = 0; d < DIAS.length; d++) {
+            if (slotLleno.has(`${d}|${p}`)) continue
+            const x = pend
+              .filter(c => c.restante > 0 && (c.porDia.get(d) ?? 0) < maxPorDia && !docenteOcupado.has(`${c.dmc.docenteId}|${d}|${p}`))
+              .sort((a, b) => b.restante - a.restante || ((a.dmc.id + d + p) % 7) - ((b.dmc.id + d + p) % 7))[0]
+            if (!x) continue
+            x.restante--
+            x.porDia.set(d, (x.porDia.get(d) ?? 0) + 1)
+            slotLleno.add(`${d}|${p}`)
+            docenteOcupado.add(`${x.dmc.docenteId}|${d}|${p}`)
+            bloques.push({
+              docenteMateriaCursoId: x.dmc.id, diaSemana: DIAS[d],
+              horaInicio: hora(PERIODOS[p][0]), horaFin: hora(PERIODOS[p][1]),
+              aula: `Aula ${cursos[ci].grado}°${cursos[ci].paralelo}`,
+            })
+          }
+        }
+      }
+      colocar(2)
+      colocar(5)
+      const faltan = pend.filter(c => c.restante > 0)
+      if (faltan.length) throw new Error(`No se pudo armar el horario del curso ${ci}: faltan horas de ${faltan.map(f => f.dmc.materia).join(', ')}`)
+    }
+    await prisma.horario.createMany({ data: bloques })
+    console.log(`✓ ${bloques.length} bloques de horario en ${CURSOS_CON_HORARIO.length} cursos (sin choques)`)
+  } else {
+    console.log('→ Horarios ya sembrados, se omite')
+  }
 
   // ══════════════════════════════════════
   // ESTUDIANTES + INSCRIPCIONES (6 por curso + Miguel retirado en 1°A)
@@ -316,12 +452,13 @@ async function main() {
 
   async function crearEstudiante(opts: {
     username: string; ci: string; nombre: string; apellido: string; rude: string;
-    cursoIdx: number; fechaNac: string; estado?: 'ACTIVA' | 'RETIRADA'; fechaRetiro?: string; obs?: string;
+    cursoIdx: number; fechaNac: string /* 'MM-DD': el año sale del grado */; estado?: 'ACTIVA' | 'RETIRADA'; fechaRetiro?: Date; obs?: string;
   }): Promise<EstRow> {
     const u = await upsertUsuario(opts.username, HASH.est, ['ESTUDIANTE'])
     const p = await crearPersona({
       ci: opts.ci, nombre: opts.nombre, apellido: opts.apellido,
-      fechaNacimiento: new Date(opts.fechaNac),
+      // 1° secundaria ≈ 12-13 años, 6° ≈ 17-18: el año de nacimiento sale del grado y de la gestión
+      fechaNacimiento: utc(ANIO - 11 - (Math.floor(opts.cursoIdx / 2) + 1) - (nEst % 2), Number(opts.fechaNac.slice(0, 2)), Number(opts.fechaNac.slice(3, 5))),
       direccion: `${CALLES[nEst % CALLES.length]} ${100 + nEst}, Oruro`,
     })
     const e = await prisma.estudiante.upsert({
@@ -329,13 +466,13 @@ async function main() {
       create: { personaId: p.id, usuarioId: u.id, rude: opts.rude, activo: true },
     })
     const insc = await prisma.inscripcion.upsert({
-      where: { estudianteId_gestionId: { estudianteId: e.id, gestionId: g25.id } },
+      where: { estudianteId_gestionId: { estudianteId: e.id, gestionId: gAct.id } },
       update: {},
       create: {
-        estudianteId: e.id, cursoId: cursos[opts.cursoIdx].id, gestionId: g25.id,
-        fechaInscripcion: new Date('2025-06-02'),
+        estudianteId: e.id, cursoId: cursos[opts.cursoIdx].id, gestionId: gAct.id,
+        fechaInscripcion: INSCRIPCION,
         estadoInscripcion: opts.estado ?? 'ACTIVA',
-        ...(opts.fechaRetiro ? { fechaRetiro: new Date(opts.fechaRetiro) } : {}),
+        ...(opts.fechaRetiro ? { fechaRetiro: opts.fechaRetiro } : {}),
         ...(opts.obs ? { observaciones: opts.obs } : {}),
       },
     })
@@ -347,15 +484,15 @@ async function main() {
 
   // 1°A: base heredada + 3 nuevos (Miguel retirado aparte)
   for (const b of BASE_1A) {
-    await crearEstudiante({ username: b.username, ci: b.ci, nombre: b.nombre, apellido: b.apellido, rude: `R2025${String(1000 + nRude++).padStart(4, '0')}`, cursoIdx: 0, fechaNac: '2010-03-15' })
+    await crearEstudiante({ username: b.username, ci: b.ci, nombre: b.nombre, apellido: b.apellido, rude: `R${ANIO}${String(1000 + nRude++).padStart(4, '0')}`, cursoIdx: 0, fechaNac: '03-15' })
   }
   const miguel = await crearEstudiante({
     username: MIGUEL.username, ci: MIGUEL.ci, nombre: MIGUEL.nombre, apellido: MIGUEL.apellido,
-    rude: `R2025${String(1000 + nRude++).padStart(4, '0')}`, cursoIdx: 0, fechaNac: '2010-01-30',
-    estado: 'RETIRADA', fechaRetiro: '2025-07-10', obs: 'Familia se trasladó a otro departamento',
+    rude: `R${ANIO}${String(1000 + nRude++).padStart(4, '0')}`, cursoIdx: 0, fechaNac: '01-30',
+    estado: 'RETIRADA', fechaRetiro: utc(PER[2].y, PER[2].m, 10), obs: 'Familia se trasladó a otro departamento',
   })
   // 1°B: Valeria + resto nuevo; demás cursos: 6 nuevos c/u
-  await crearEstudiante({ username: BASE_1B[0].username, ci: BASE_1B[0].ci, nombre: BASE_1B[0].nombre, apellido: BASE_1B[0].apellido, rude: `R2025${String(1000 + nRude++).padStart(4, '0')}`, cursoIdx: 1, fechaNac: '2009-05-17' })
+  await crearEstudiante({ username: BASE_1B[0].username, ci: BASE_1B[0].ci, nombre: BASE_1B[0].nombre, apellido: BASE_1B[0].apellido, rude: `R${ANIO}${String(1000 + nRude++).padStart(4, '0')}`, cursoIdx: 1, fechaNac: '05-17' })
   const porCurso = [3, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6] // nuevos por curso (1°A..6°B)
   for (let ci = 0; ci < 12; ci++) {
     for (let k = 0; k < porCurso[ci]; k++) {
@@ -364,8 +501,8 @@ async function main() {
       const apellido = `${APELLIDOS[(gi * 5) % APELLIDOS.length]} ${APELLIDOS[(gi * 11 + 3) % APELLIDOS.length]}`
       await crearEstudiante({
         username: `est_s${String(gi + 1).padStart(2, '0')}`, ci: `E${2001 + gi}`,
-        nombre, apellido, rude: `R2025${String(1000 + nRude++).padStart(4, '0')}`,
-        cursoIdx: ci, fechaNac: `${2009 + (gi % 3)}-${String(1 + (gi % 12)).padStart(2, '0')}-15`,
+        nombre, apellido, rude: `R${ANIO}${String(1000 + nRude++).padStart(4, '0')}`,
+        cursoIdx: ci, fechaNac: `${String(1 + (gi % 12)).padStart(2, '0')}-15`,
       })
     }
   }
@@ -423,12 +560,11 @@ async function main() {
   if (hayNotas > 0) {
     console.log('→ Notas ya sembradas, se omite el bulk (re-ejecución segura)')
   } else {
-    const trimNum: Record<number, number> = { [trims25[1].id]: 1, [trims25[2].id]: 2, [trims25[3].id]: 3 }
-    const trimMes: Record<number, number> = { [trims25[1].id]: 6, [trims25[2].id]: 7, [trims25[3].id]: 8 }
+    const trimNum: Record<number, number> = { [trimsAct[1].id]: 1, [trimsAct[2].id]: 2, [trimsAct[3].id]: 3 }
     const dimNombres = ['Ser', 'Saber', 'Hacer', 'Decidir']
     const actNombres: Record<string, string> = { Ser: 'Autoevaluación de valores', Saber: 'Examen escrito', Hacer: 'Trabajo práctico', Decidir: 'Participación y proyecto' }
     const dimMax: Record<string, number> = { Ser: 5, Saber: 100, Hacer: 100, Decidir: 100 }
-    const trimIds = [trims25[1].id, trims25[2].id, trims25[3].id]
+    const trimIds = [trimsAct[1].id, trimsAct[2].id, trimsAct[3].id]
 
     // 1) Actividades (bulk) — 96 DMC x 3 trim x 4 dim
     const acts: Array<{ docenteMateriaCursoId: number; trimestreId: number; dimensionId: number; nombre: string; puntajeMaximo: number; peso: number; fecha: Date; activo: boolean }> = []
@@ -436,9 +572,9 @@ async function main() {
       for (const tid of trimIds) {
         for (const dn of dimNombres) {
           acts.push({
-            docenteMateriaCursoId: dmc.id, trimestreId: tid, dimensionId: (dims25[dn] as { id: number }).id,
+            docenteMateriaCursoId: dmc.id, trimestreId: tid, dimensionId: (dimsAct[dn] as { id: number }).id,
             nombre: actNombres[dn], puntajeMaximo: dimMax[dn], peso: 1,
-            fecha: new Date(`2025-${String(trimMes[tid]).padStart(2, '0')}-15`), activo: true,
+            fecha: fechaTrim(trimNumPorId[tid], 15), activo: true,
           })
         }
       }
@@ -466,7 +602,7 @@ async function main() {
       for (const tid of trimIds) {
         const tnum = trimNum[tid]
         for (const dn of dimNombres) {
-          const aid = actId.get(`${dmc.id}-${tid}-${(dims25[dn] as { id: number }).id}`)!
+          const aid = actId.get(`${dmc.id}-${tid}-${(dimsAct[dn] as { id: number }).id}`)!
           for (const e of (inscPorCurso[dmc.cursoIdx] ?? [])) {
             if (tnum === 3 && e.globalIdx % 7 === 0) continue // T3 parcial → pendientes
             let f = frac(e.globalIdx, tnum, dmc.id % 5)
@@ -506,10 +642,10 @@ async function main() {
           if (empate.includes(e.globalIdx) && tnum <= 2) f = tnum === 1 ? 0.8 : 0.82
           const cid = calId.get(`${e.inscId}-${dmc.id}-${tid}`)!
           calDims.push(
-            { calificacionId: cid, dimensionId: (dims25.Ser as { id: number }).id, promedio: Math.round(f * 5 * 100) / 100 },
-            { calificacionId: cid, dimensionId: (dims25.Saber as { id: number }).id, promedio: Math.round(f * 45 * 100) / 100 },
-            { calificacionId: cid, dimensionId: (dims25.Hacer as { id: number }).id, promedio: Math.round(f * 40 * 100) / 100 },
-            { calificacionId: cid, dimensionId: (dims25.Decidir as { id: number }).id, promedio: Math.round(f * 10 * 100) / 100 },
+            { calificacionId: cid, dimensionId: (dimsAct.Ser as { id: number }).id, promedio: Math.round(f * 5 * 100) / 100 },
+            { calificacionId: cid, dimensionId: (dimsAct.Saber as { id: number }).id, promedio: Math.round(f * 45 * 100) / 100 },
+            { calificacionId: cid, dimensionId: (dimsAct.Hacer as { id: number }).id, promedio: Math.round(f * 40 * 100) / 100 },
+            { calificacionId: cid, dimensionId: (dimsAct.Decidir as { id: number }).id, promedio: Math.round(f * 10 * 100) / 100 },
           )
         }
       }
@@ -520,20 +656,20 @@ async function main() {
     // 4) Miguel: T1 (frac 0.45) + historial 45→48→50 (caso corrección heredado)
     const dmcMat1A = dmcs.find(d => d.cursoIdx === 0 && d.materia === 'MAT')!
     for (const dn of dimNombres) {
-      const aid = actId.get(`${dmcMat1A.id}-${trims25[1].id}-${(dims25[dn] as { id: number }).id}`)!
+      const aid = actId.get(`${dmcMat1A.id}-${trimsAct[1].id}-${(dimsAct[dn] as { id: number }).id}`)!
       await prisma.notaActividad.upsert({
         where: { actividadEvaluativaId_inscripcionId: { actividadEvaluativaId: aid, inscripcionId: miguel.inscId } },
         update: {}, create: { actividadEvaluativaId: aid, inscripcionId: miguel.inscId, nota: Math.round(dimMax[dn] * 0.45 * 100) / 100, registradoPorId: U.doc_mamani.id },
       })
     }
     const calMig = await prisma.calificacion.upsert({
-      where: { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId: miguel.inscId, docenteMateriaCursoId: dmcMat1A.id, trimestreId: trims25[1].id } },
-      update: { promedioTrimestral: 50 }, create: { inscripcionId: miguel.inscId, docenteMateriaCursoId: dmcMat1A.id, trimestreId: trims25[1].id, promedioTrimestral: 50 },
+      where: { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId: miguel.inscId, docenteMateriaCursoId: dmcMat1A.id, trimestreId: trimsAct[1].id } },
+      update: { promedioTrimestral: 50 }, create: { inscripcionId: miguel.inscId, docenteMateriaCursoId: dmcMat1A.id, trimestreId: trimsAct[1].id, promedioTrimestral: 50 },
     })
     for (const d of await prisma.calificacionDimension.findMany({ where: { calificacionId: calMig.id } })) {
       await prisma.calificacionDimension.delete({ where: { id: d.id } })
     }
-    const dims = [[dims25.Ser, 5], [dims25.Saber, 45], [dims25.Hacer, 40], [dims25.Decidir, 10]] as const
+    const dims = [[dimsAct.Ser, 5], [dimsAct.Saber, 45], [dimsAct.Hacer, 40], [dimsAct.Decidir, 10]] as const
     for (const [dim, max] of dims) {
       await prisma.calificacionDimension.create({ data: { calificacionId: calMig.id, dimensionId: (dim as { id: number }).id, promedio: Math.round(0.5 * Number(max) * 100) / 100 } })
     }
@@ -548,24 +684,28 @@ async function main() {
   if (await prisma.asistencia.count() > 0) {
     console.log('→ Asistencia ya sembrada, se omite el bulk')
   } else {
-    const trimIds = [trims25[1].id, trims25[2].id, trims25[3].id]
-    const trimMes: Record<number, number> = { [trims25[1].id]: 6, [trims25[2].id]: 7, [trims25[3].id]: 8 }
-    const rows: Array<{ inscripcionId: number; docenteMateriaCursoId: number; trimestreId: number; fecha: Date; estado: 'PRESENTE' | 'AUSENTE' | 'RETRASO' }> = []
+    const trimIds = [trimsAct[1].id, trimsAct[2].id, trimsAct[3].id]
+    type EstadoAsist = 'PRESENTE' | 'AUSENTE' | 'RETRASO' | 'JUSTIFICADO'
+    const rows: Array<{ inscripcionId: number; docenteMateriaCursoId: number; trimestreId: number; fecha: Date; estado: EstadoAsist; justificacion?: string }> = []
     for (let ci = 0; ci < cursos.length; ci++) {
       const cursoDmcs = dmcs.filter(d => d.cursoIdx === ci && (d.materia === 'MAT' || d.materia === 'LEN'))
       const delCurso = await prisma.inscripcion.findMany({
-        where: { cursoId: cursos[ci].id, gestionId: g25.id, estadoInscripcion: 'ACTIVA' },
+        where: { cursoId: cursos[ci].id, gestionId: gAct.id, estadoInscripcion: 'ACTIVA' },
         select: { id: true, estudianteId: true },
       })
       const giOf = new Map(estudiantes.map(e => [e.inscId, e.globalIdx]))
       for (const dmc of cursoDmcs) {
         for (const tid of trimIds) {
-          const dias = diasHabiles(2025, trimMes[tid])
+          const dias = diasHabiles(PER[trimNumPorId[tid]].y, PER[trimNumPorId[tid]].m, ANCLA)
           dias.forEach((fecha, di) => {
             for (const insc of delCurso) {
               const gi = giOf.get(insc.id) ?? 0
               const perfil = gi % 4
-              rows.push({ inscripcionId: insc.id, docenteMateriaCursoId: dmc.id, trimestreId: tid, fecha, estado: estadoAsistencia(perfil, di, gi) })
+              let estado: EstadoAsist = estadoAsistencia(perfil, di, gi)
+              let justificacion: string | undefined
+              // Algunas ausencias llegan con justificativo (el cuarto estado que la app también maneja)
+              if (estado === 'AUSENTE' && (di + gi) % 4 === 0) { estado = 'JUSTIFICADO'; justificacion = MOTIVOS_JUSTIFICACION[(di + gi) % MOTIVOS_JUSTIFICACION.length] }
+              rows.push({ inscripcionId: insc.id, docenteMateriaCursoId: dmc.id, trimestreId: tid, fecha, estado, ...(justificacion ? { justificacion } : {}) })
             }
           })
         }
@@ -575,12 +715,13 @@ async function main() {
       await prisma.asistencia.createMany({ data: rows.slice(i, i + 1000) })
     }
     // Resúmenes calculados de lo generado (fuente: las filas de arriba)
-    const grupos = new Map<string, { p: number; a: number; r: number; t: number }>()
+    const grupos = new Map<string, { p: number; a: number; r: number; j: number; t: number }>()
     for (const r of rows) {
       const k = `${r.inscripcionId}-${r.docenteMateriaCursoId}-${r.trimestreId}`
-      const g = grupos.get(k) ?? { p: 0, a: 0, r: 0, t: 0 }
+      const g = grupos.get(k) ?? { p: 0, a: 0, r: 0, j: 0, t: 0 }
       if (r.estado === 'PRESENTE') g.p++
       else if (r.estado === 'AUSENTE') g.a++
+      else if (r.estado === 'JUSTIFICADO') g.j++
       else g.r++
       g.t++
       grupos.set(k, g)
@@ -590,8 +731,9 @@ async function main() {
       const [inscId, dmcId, tid] = k.split('-').map(Number)
       res.push({
         inscripcionId: inscId, docenteMateriaCursoId: dmcId, trimestreId: tid,
-        totalClases: g.t, totalPresente: g.p, totalAusente: g.a, totalRetraso: g.r, totalJustificado: 0,
-        porcentaje: Math.round((g.p / g.t) * 100 * 100) / 100,
+        totalClases: g.t, totalPresente: g.p, totalAusente: g.a, totalRetraso: g.r, totalJustificado: g.j,
+        // igual que la aplicación: (presentes + justificados) / total
+        porcentaje: Math.round(((g.p + g.j) / g.t) * 100 * 100) / 100,
       })
     }
     for (let i = 0; i < res.length; i += 500) await prisma.resumenAsistencia.createMany({ data: res.slice(i, i + 500) })
@@ -605,16 +747,16 @@ async function main() {
     console.log('→ Pagos ya sembrados, se omite')
   } else {
     const cp = async (nombre: string, monto: number, obligatorio: boolean, desc: string) => {
-      const ex = await prisma.conceptoPago.findFirst({ where: { nombre, gestionId: g25.id } })
-      return ex ?? prisma.conceptoPago.create({ data: { nombre, descripcion: desc, monto, obligatorio, gestionId: g25.id } })
+      const ex = await prisma.conceptoPago.findFirst({ where: { nombre, gestionId: gAct.id } })
+      return ex ?? prisma.conceptoPago.create({ data: { nombre, descripcion: desc, monto, obligatorio, gestionId: gAct.id } })
     }
-    const cpMat = await cp('Matrícula 2025', 150, true, 'Pago de matrícula gestión 2025.')
+    const cpMat = await cp(`Matrícula ${ANIO}`, 150, true, `Pago de matrícula gestión ${ANIO}.`)
     const cpDid = await cp('Material Didáctico', 80, true, 'Contribución para material y fotocopias.')
     const cpMan = await cp('Mantenimiento Infraestructura', 50, false, 'Contribución voluntaria de mantenimiento.')
     let rec = 1
-    const mkRecibo = () => `REC-2025-${String(rec++).padStart(4, '0')}`
+    const mkRecibo = () => `REC-${PER[1].y}-${String(rec++).padStart(4, '0')}`
     const pagos: Array<{ inscripcionId: number; conceptoPagoId: number; montoOriginal: number; montoPagado: number; metodoPago: 'EFECTIVO' | 'TRANSFERENCIA' | 'QR'; estado: 'PAGADO' | 'PARCIAL' | 'PENDIENTE' | 'ANULADO'; numeroRecibo: string; registradoPorId: number; fechaPago: Date }> = []
-    const fechaPago = new Date('2025-06-05')
+    const fechaPago = utc(PER[1].y, PER[1].m, 5)
     for (const e of estudiantes) {
       const insc = await prisma.inscripcion.findUnique({ where: { id: e.inscId } })
       if (!insc || insc.estadoInscripcion !== 'ACTIVA') {
@@ -648,18 +790,18 @@ async function main() {
   if ((await prisma.bitacoraClase.count()) === 0) {
     const dmcMat1A = dmcs.find(d => d.cursoIdx === 0 && d.materia === 'MAT')!
     const dmcLen1B = dmcs.find(d => d.cursoIdx === 1 && d.materia === 'LEN')!
-    const temas: Array<[number, number, string, string, string, string]> = [
-      [dmcMat1A.id, trims25[1].id, '2025-06-03', 'Números enteros', 'Introducción a operaciones básicas.', 'Ejercicios pág. 15-16'],
-      [dmcMat1A.id, trims25[1].id, '2025-06-10', 'Fracciones', 'Operaciones con fracciones propias.', 'Taller de fracciones'],
-      [dmcMat1A.id, trims25[2].id, '2025-07-08', 'Decimales', 'Representación y operaciones.', 'Ejercicios pág. 22-23'],
-      [dmcMat1A.id, trims25[2].id, '2025-07-22', 'Porcentajes', 'Cálculo en problemas cotidianos.', '10 problemas de aplicación'],
-      [dmcMat1A.id, trims25[3].id, '2025-08-05', 'Álgebra — variables', 'Concepto de variable y expresiones.', 'Pág. 35 — identificar vars'],
-      [dmcLen1B.id, trims25[1].id, '2025-06-04', 'Comprensión lectora', 'Lectura guiada y preguntas.', 'Cuestionario pág. 8'],
-      [dmcLen1B.id, trims25[2].id, '2025-07-09', 'Gramática: el verbo', 'Conjugación en presente.', 'Ejercicios pág. 30'],
-      [dmcLen1B.id, trims25[3].id, '2025-08-06', 'Redacción', 'Texto descriptivo.', 'Redactar 1 página'],
+    const temas: Array<[number, number, Date, string, string, string]> = [
+      [dmcMat1A.id, trimsAct[1].id, fechaTrim(1, 3),  'Números enteros', 'Introducción a operaciones básicas.', 'Ejercicios pág. 15-16'],
+      [dmcMat1A.id, trimsAct[1].id, fechaTrim(1, 10), 'Fracciones', 'Operaciones con fracciones propias.', 'Taller de fracciones'],
+      [dmcMat1A.id, trimsAct[2].id, fechaTrim(2, 8),  'Decimales', 'Representación y operaciones.', 'Ejercicios pág. 22-23'],
+      [dmcMat1A.id, trimsAct[2].id, fechaTrim(2, 22), 'Porcentajes', 'Cálculo en problemas cotidianos.', '10 problemas de aplicación'],
+      [dmcMat1A.id, trimsAct[3].id, fechaTrim(3, 5),  'Álgebra — variables', 'Concepto de variable y expresiones.', 'Pág. 35 — identificar vars'],
+      [dmcLen1B.id, trimsAct[1].id, fechaTrim(1, 4),  'Comprensión lectora', 'Lectura guiada y preguntas.', 'Cuestionario pág. 8'],
+      [dmcLen1B.id, trimsAct[2].id, fechaTrim(2, 9),  'Gramática: el verbo', 'Conjugación en presente.', 'Ejercicios pág. 30'],
+      [dmcLen1B.id, trimsAct[3].id, fechaTrim(3, 6),  'Redacción', 'Texto descriptivo.', 'Redactar 1 página'],
     ]
-    for (const [dmcId, tid, fecha, tema, desc, tarea] of temas) {
-      await prisma.bitacoraClase.create({ data: { docenteMateriaCursoId: dmcId, trimestreId: tid, fecha: new Date(fecha as string), tema: tema as string, descripcion: desc as string, tareaAsignada: tarea as string } })
+    for (const [dmcId, tid, fecha, tema, descripcion, tareaAsignada] of temas) {
+      await prisma.bitacoraClase.create({ data: { docenteMateriaCursoId: dmcId, trimestreId: tid, fecha, tema, descripcion, tareaAsignada } })
     }
     console.log('✓ Bitácora (8 registros en 1°A-MAT y 1°B-LEN)')
   } else {
@@ -667,50 +809,72 @@ async function main() {
   }
 
   // ══════════════════════════════════════
-  // VERIFICACIÓN (conteos + invariantes, no falla: informa)
+  // VERIFICACIÓN — si algo no cumple, el seed FALLA (código de salida 1)
   // ══════════════════════════════════════
   console.log('\n── Verificación ──')
-  const nInsc = await prisma.inscripcion.count({ where: { gestionId: g25.id } })
-  const nNotas = await prisma.notaActividad.count()
-  const nAsis = await prisma.asistencia.count()
-  const nPagos = await prisma.pago.count()
-  const nCal = await prisma.calificacion.count()
-  const t3SinNota = await prisma.inscripcion.count({
-    where: {
-      gestionId: g25.id, estadoInscripcion: 'ACTIVA',
-      calificaciones: { none: { trimestreId: trims25[3].id } },
-    },
-  })
-  const sumaPesos = await prisma.dimensionEvaluacion.aggregate({ where: { gestionId: g25.id }, _sum: { pesoEnPromedio: true } })
-  const allUsernames: Array<{ username: string }> = await prisma.usuario.findMany({ select: { username: true } })
-  const vistos = new Set<string>()
-  let usuariosDup = 0
-  for (const u of allUsernames) {
-    if (vistos.has(u.username)) usuariosDup++
-    vistos.add(u.username)
+  const fallos: string[] = []
+  const verificar = (nombre: string, ok: boolean, detalle: string) => {
+    console.log(`${ok ? '✓' : '✗'} ${nombre}: ${detalle}`)
+    if (!ok) fallos.push(nombre)
   }
-  console.log(`inscripciones 2025: ${nInsc} (esperado 73)`)
-  console.log(`notas: ${nNotas} | calificaciones: ${nCal} | asistencias: ${nAsis} | pagos: ${nPagos}`)
-  console.log(`T3 sin calificar (pendientes demo): ${t3SinNota} (esperado > 0)`)
-  console.log(`suma pesos dimensiones: ${Number(sumaPesos._sum.pesoEnPromedio)} (esperado 1)`)
-  console.log(`usernames duplicados: ${usuariosDup} (esperado 0)`)
+  const nInsc = await prisma.inscripcion.count({ where: { gestionId: gAct.id } })
+  verificar('inscripciones', nInsc === 73, `${nInsc} (esperado 73)`)
+
+  const t3SinNota = await prisma.inscripcion.count({
+    where: { gestionId: gAct.id, estadoInscripcion: 'ACTIVA', calificaciones: { none: { trimestreId: trimsAct[3].id } } },
+  })
+  verificar('T3 sin calificar (pendientes demo)', t3SinNota > 0, `${t3SinNota} (esperado > 0)`)
+
+  const sumaPesos = await prisma.dimensionEvaluacion.aggregate({ where: { gestionId: gAct.id }, _sum: { pesoEnPromedio: true } })
+  verificar('suma de pesos de dimensiones', Number(sumaPesos._sum.pesoEnPromedio) === 1, `${Number(sumaPesos._sum.pesoEnPromedio)} (esperado 1)`)
+
+  const materiasSinCampo = await prisma.materia.count({ where: { campoSaberId: null } })
+  verificar('materias con campo de saber', materiasSinCampo === 0, `${materiasSinCampo} sin campo (esperado 0)`)
+
+  const nHorarios = await prisma.horario.count()
+  verificar('bloques de horario', nHorarios === CURSOS_CON_HORARIO.length * HORAS_SEMANA, `${nHorarios} (esperado ${CURSOS_CON_HORARIO.length * HORAS_SEMANA})`)
+  const [{ n: choques }] = await prisma.$queryRaw<Array<{ n: bigint }>>`
+    SELECT count(*) AS n
+    FROM "Horario" a
+    JOIN "DocenteMateriaCurso" da ON da.id = a."docenteMateriaCursoId"
+    JOIN "Horario" b ON b.id > a.id AND b."diaSemana" = a."diaSemana" AND a."horaInicio" < b."horaFin" AND b."horaInicio" < a."horaFin"
+    JOIN "DocenteMateriaCurso" db ON db.id = b."docenteMateriaCursoId"
+    WHERE da."docenteId" = db."docenteId" OR da."cursoId" = db."cursoId"`
+  verificar('choques de horario (docente o curso)', Number(choques) === 0, `${choques} (esperado 0)`)
+
+  const [{ n: finDeSemana }] = await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM "Asistencia" WHERE extract(isodow FROM "fecha") IN (6, 7)`
+  verificar('asistencias en sábado o domingo', Number(finDeSemana) === 0, `${finDeSemana} (esperado 0)`)
+  const futuras = await prisma.asistencia.count({ where: { fecha: { gt: ANCLA } } })
+  verificar('asistencias posteriores a la ancla', futuras === 0, `${futuras} (esperado 0)`)
+
+  console.log(`\nnotas: ${await prisma.notaActividad.count()} | calificaciones: ${await prisma.calificacion.count()} | asistencias: ${await prisma.asistencia.count()} | pagos: ${await prisma.pago.count()}`)
+  if (fallos.length) throw new Error(`Verificación fallida: ${fallos.join('; ')}`)
 
   console.log('\n════════════════════════════════════════════════════════')
-  console.log('✅ Seed robusta completada')
+  console.log('✅ Seed de demo completada')
   console.log('════════════════════════════════════════════════════════')
-  console.log('\nCREDENCIALES (hash reusado por rol):')
-  console.log('  director/admin1234 (DIRECTOR+DOCENTE) · secretaria/sec1234')
-  console.log('  doc_mamani|quispe|flores|condori|rios|paredes|soto|aliaga|libre / doc1234')
-  console.log('  est_ana|est_pedro|est_lucia|est_miguel|est_valeria + est_s01.. / est1234')
-  console.log('  tut_rosa|tut_miguel|tut_carmen|tut_elena(DOCENTE+TUTOR) + tut_t.. / tut1234')
+  if (PASS_DEMO) {
+    console.log('\nCUENTAS (todas con la contraseña de SEED_PASSWORD_DEMO):')
+  } else {
+    console.log('\nCREDENCIALES (solo desarrollo; hash reusado por rol):')
+  }
+  const clave = (p: string) => (PASS_DEMO ? '<SEED_PASSWORD_DEMO>' : p)
+  console.log(`  director/${clave('admin1234')} (DIRECTOR+DOCENTE) · secretaria/${clave('sec1234')}`)
+  console.log(`  doc_mamani|quispe|flores|condori|rios|paredes|soto|aliaga|libre / ${clave('doc1234')}`)
+  console.log(`  est_ana|est_pedro|est_lucia|est_miguel|est_valeria + est_s01.. / ${clave('est1234')}`)
+  console.log(`  tut_rosa|tut_miguel|tut_carmen|tut_elena(DOCENTE+TUTOR) + tut_t.. / ${clave('tut1234')}`)
   console.log('\nCASOS DE PRUEBA:')
-  console.log('  Miguel → RETIRADO 10/07 + historial MAT T1 (45→48→50)')
-  console.log('  Valeria → sin pagos · Pedro → matrícula PARCIAL · 1 PENDIENTE · perfiles ~50% asistencia')
+  console.log('  Miguel → RETIRADO + historial MAT T1 (45→48→50)')
+  console.log('  Valeria → sin pagos · Pedro → matrícula PARCIAL · 1 PENDIENTE · perfiles ~50% asistencia (con justificadas)')
   console.log('  Empate exacto en 1°A T1/T2 (ranking) · QUECHUA sin asignar · Ruth Limachi sin carga')
-  console.log('  T3 al ~85%: cerrar desde la UI debe pedir lo faltante (widget con nombres)')
-  console.log('  2026 inactiva y vacía: probar promoción + propuesta de inscripciones + activación')
+  console.log('  Horarios completos en 1°A, 1°B, 2°A, 2°B (sin choques) · boletín agrupado por campo de saber')
+  console.log('  T3 = mes en curso, ~85% calificado: cerrar desde la UI debe pedir lo faltante (widget con nombres)')
+  console.log(`  Gestión ${ANIO + 1} inactiva y vacía: probar promoción + propuesta de inscripciones + activación`)
 }
 
 main()
-  .catch(console.error)
+  .catch(e => {
+    console.error('\n❌ Seed falló:', e)
+    process.exitCode = 1   // antes: .catch(console.error) → salía con 0 y parecía exitoso
+  })
   .finally(() => prisma.$disconnect())

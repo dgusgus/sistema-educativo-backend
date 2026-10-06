@@ -11,7 +11,8 @@
     "db:migrate": "prisma migrate dev && prisma generate",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
-    "db:seed": "prisma db seed"
+    "db:seed": "prisma db seed",
+    "db:seed:prod": "tsx prisma/seed.produccion.ts"
   },
   "keywords": [],
   "author": "",

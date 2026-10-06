@@ -25,9 +25,7 @@ export function mensajeValidacion(issues: ReadonlyArray<{ path: ReadonlyArray<Pr
     .join('; ')
 }
 
-// "María" y "maria " se consideran el mismo texto (para detectar un mismo CI con otro nombre).
-export const sinTildes = (s: string): string =>
-  s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+export { sinTildes } from './persona.helper.js'
 
 function mensajeDeFila(e: unknown): string {
   if (e instanceof ErrorDeUsuario) return e.message

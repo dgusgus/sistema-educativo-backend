@@ -1,10 +1,10 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
-import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
+import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona, personaExistenteParaPerfil } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
 
 import { leerExcel, generarExcel, texto, type ColumnaImport } from '../lib/excel.helper.js'
-import { ejecutarImport, mensajeValidacion } from '../lib/import.helper.js'
+import { ejecutarImport, mensajeValidacion, sinTildes } from '../lib/import.helper.js'
 import { ErrorDeUsuario } from '../lib/errores.js'
 import { createDocenteSchema } from '../schemas/persona.schema.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
@@ -112,14 +112,11 @@ export const createDocente = async (req: Request, res: Response): Promise<void> 
   }
 
   try {
-    const existe = await buscarPersonaPorCi(persona.ci)
-    if (existe) {
-      res.status(409).json({ error: `Ya existe una persona registrada con el CI ${persona.ci}` })
-      return
-    }
-
     const docente = await prisma.$transaction(async tx => {
-      const personaCreada = await crearPersona(tx, persona)
+      // Si el CI ya es de la MISMA persona (p. ej. un docente que también es tutor) solo se le
+      // agrega este perfil; si es de otra persona o ya tiene el perfil → ErrorDeUsuario 409.
+      const previa = await personaExistenteParaPerfil(tx, persona, 'docente')
+      const personaCreada = previa ?? await crearPersona(tx, persona)
       return tx.docente.create({
         data:    { personaId: personaCreada.id, especialidad },
         include: { persona: true },
@@ -128,6 +125,9 @@ export const createDocente = async (req: Request, res: Response): Promise<void> 
 
     res.status(201).json(aplanarPersona(docente))
   } catch (error) {
+    if (error instanceof ErrorDeUsuario) { res.status(error.status).json({ error: error.message }); return }
+    // Dos altas simultáneas con el mismo CI: la BD rechaza la segunda (antes: error 500)
+    if ((error as { code?: string }).code === 'P2002') { res.status(409).json({ error: `Ya existe un registro con el CI ${persona.ci}` }); return }
     console.error('[docente.createDocente]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
@@ -387,10 +387,11 @@ export const importDocentes = asyncHandler(async (req: Request, res: Response): 
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
 
   const cisEnArchivo = [...new Set(filas.map(f => { try { return texto(f.datos.CI) } catch { return '' } }).filter(Boolean))]
-  const existentes = new Set(
-    (await prisma.persona.findMany({ where: { ci: { in: cisEnArchivo } }, select: { ci: true } }))
-      .map(p => p.ci).filter((ci): ci is string => ci !== null)
-  )
+  const personas = await prisma.persona.findMany({
+    where:  { ci: { in: cisEnArchivo } },
+    select: { id: true, ci: true, nombre: true, apellido: true, docente: { select: { id: true } } },
+  })
+  const personaPorCi = new Map(personas.filter(p => p.ci !== null).map(p => [p.ci as string, p]))
   const vistos = new Map<string, number>()
 
   const resultado = await ejecutarImport(filas, async ({ fila, datos }) => {
@@ -408,14 +409,24 @@ export const importDocentes = asyncHandler(async (req: Request, res: Response): 
     const previa = vistos.get(v.ci)
     if (previa !== undefined) throw new ErrorDeUsuario(`CI duplicado en el archivo (ya aparece en la fila ${previa})`)
     vistos.set(v.ci, fila)
-    if (existentes.has(v.ci)) throw new ErrorDeUsuario(`Ya existe una persona con CI ${v.ci}`)
+    // Si el CI ya es de la MISMA persona (p. ej. un tutor que también es docente) solo se le agrega
+    // el perfil de docente; con otro nombre se rechaza (casi seguro un error de digitación).
+    const enBd = personaPorCi.get(v.ci)
+    if (enBd) {
+      if (enBd.docente) throw new ErrorDeUsuario(`Ya existe un docente con CI ${v.ci}`)
+      if (sinTildes(`${v.nombre} ${v.apellido}`) !== sinTildes(`${enBd.nombre} ${enBd.apellido}`)) {
+        throw new ErrorDeUsuario(`El CI ${v.ci} ya está registrado a nombre de ${enBd.nombre} ${enBd.apellido}`)
+      }
+    }
 
     return prisma.$transaction(async tx => {
-      const persona = await crearPersona(tx, {
-        ci: v.ci, nombre: v.nombre, apellido: v.apellido,
-        email: v.email ?? undefined, telefono: v.telefono ?? undefined,
-      })
-      return tx.docente.create({ data: { personaId: persona.id, especialidad: v.especialidad ?? undefined } })
+      const personaId = enBd
+        ? enBd.id
+        : (await crearPersona(tx, {
+            ci: v.ci, nombre: v.nombre, apellido: v.apellido,
+            email: v.email ?? undefined, telefono: v.telefono ?? undefined,
+          })).id
+      return tx.docente.create({ data: { personaId, especialidad: v.especialidad ?? undefined } })
     })
   })
 

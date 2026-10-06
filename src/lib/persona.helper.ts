@@ -10,6 +10,7 @@
 //      lo que ya consume el frontend
 
 import { prisma } from './prisma.js'
+import { ErrorDeUsuario } from './errores.js'
 import type { Rol } from '../../prisma/generated/prisma/enums.js'
 
 // ─── Persona ────────────────────────────────────────────────────────────────
@@ -172,3 +173,40 @@ export async function crearPerfilesParaRoles(
 }
 
 export const ROLES_VALIDOS: Rol[] = ['DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR']
+
+// "María" y "maria " se consideran el mismo texto.
+export const sinTildes = (s: string): string =>
+  s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+
+// Una misma PERSONA puede tener varios perfiles (un docente que también es tutor de un
+// alumno, un padre contratado como docente...). El modelo lo permite: Persona es compartida.
+// Antes, registrar un tutor/docente con un CI ya existente respondía 409 siempre, aunque
+// fuera la misma persona.
+//
+// Si el CI ya existe:
+//   • misma persona (mismo nombre y apellido) sin ese perfil → se devuelve para AGREGARLE el
+//     perfil; sus datos de contacto NO se modifican (se editan desde su ficha);
+//   • otro nombre → 409: casi seguro es un error de digitación y no se mezclan personas;
+//   • ya tiene ese perfil → 409.
+// Si el CI es nuevo devuelve null (hay que crear la persona).
+export async function personaExistenteParaPerfil(
+  tx: any,
+  datos: { ci: string; nombre: string; apellido: string },
+  perfil: 'docente' | 'tutor',
+): Promise<{ id: number } | null> {
+  const existente = await tx.persona.findUnique({
+    where:  { ci: datos.ci },
+    select: { id: true, nombre: true, apellido: true, docente: { select: { id: true } }, tutor: { select: { id: true } } },
+  })
+  if (!existente) return null
+
+  if (sinTildes(`${datos.nombre} ${datos.apellido}`) !== sinTildes(`${existente.nombre} ${existente.apellido}`)) {
+    throw new ErrorDeUsuario(
+      `El CI ${datos.ci} ya está registrado a nombre de ${existente.nombre} ${existente.apellido}. ` +
+      'Si es otra persona, revisa el CI; si es la misma, escribe su nombre tal como está registrado.',
+      409,
+    )
+  }
+  if (existente[perfil]) throw new ErrorDeUsuario(`Ya existe un ${perfil} con el CI ${datos.ci}`, 409)
+  return { id: existente.id }
+}

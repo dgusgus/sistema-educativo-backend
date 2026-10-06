@@ -1,6 +1,6 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
-import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
+import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona, personaExistenteParaPerfil } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
 import { leerExcel, generarExcel, texto, type ColumnaImport } from '../lib/excel.helper.js'
 import { ejecutarImport, mensajeValidacion, sinTildes } from '../lib/import.helper.js'
@@ -171,14 +171,11 @@ export const createTutor = async (req: Request, res: Response): Promise<void> =>
   }
 
   try {
-    const existe = await buscarPersonaPorCi(persona.ci)
-    if (existe) {
-      res.status(409).json({ error: `Ya existe una persona registrada con el CI ${persona.ci}` })
-      return
-    }
-
     const tutor = await prisma.$transaction(async tx => {
-      const personaCreada = await crearPersona(tx, persona)
+      // Si el CI ya es de la MISMA persona (p. ej. un docente que también es tutor) solo se le
+      // agrega este perfil; si es de otra persona o ya tiene el perfil → ErrorDeUsuario 409.
+      const previa = await personaExistenteParaPerfil(tx, persona, 'tutor')
+      const personaCreada = previa ?? await crearPersona(tx, persona)
       return tx.tutor.create({
         data:    { personaId: personaCreada.id, ocupacion, gradoInstruccion },
         include: { persona: true },
@@ -187,6 +184,9 @@ export const createTutor = async (req: Request, res: Response): Promise<void> =>
 
     res.status(201).json(aplanarPersona(tutor))
   } catch (error) {
+    if (error instanceof ErrorDeUsuario) { res.status(error.status).json({ error: error.message }); return }
+    // Dos altas simultáneas con el mismo CI: la BD rechaza la segunda (antes: error 500)
+    if ((error as { code?: string }).code === 'P2002') { res.status(409).json({ error: `Ya existe un registro con el CI ${persona.ci}` }); return }
     console.error('[tutor.createTutor]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
@@ -349,7 +349,7 @@ export const importTutores = asyncHandler(async (req: Request, res: Response): P
 
   const personas = await prisma.persona.findMany({
     where:  { ci: { in: cis } },
-    select: { ci: true, nombre: true, apellido: true, tutor: { select: { id: true } } },
+    select: { id: true, ci: true, nombre: true, apellido: true, tutor: { select: { id: true } } },
   })
   const personaPorCi = new Map(personas.filter(p => p.ci !== null).map(p => [p.ci as string, p]))
 
@@ -392,13 +392,20 @@ export const importTutores = asyncHandler(async (req: Request, res: Response): P
     const enBd   = personaPorCi.get(v.ci)
     let tutorId: number | null = null
     let referencia: { nombre: string; apellido: string } | null = null
+    let personaExistenteId: number | null = null   // persona que YA existe pero aún no es tutor
     if (previo) {
       tutorId = previo.tutorId
       referencia = previo
-    } else if (enBd) {
-      if (!enBd.tutor) throw new ErrorDeUsuario(`Ya existe una persona con CI ${v.ci} que no está registrada como tutor`)
+    } else if (enBd?.tutor) {
       tutorId = enBd.tutor.id
       referencia = enBd
+    } else if (enBd) {
+      // Misma persona con otro perfil (p. ej. una docente que también es tutora): solo se le
+      // agrega el perfil de tutor. Con otro nombre se rechaza (casi seguro un error de digitación).
+      if (sinTildes(`${v.nombre} ${v.apellido}`) !== sinTildes(`${enBd.nombre} ${enBd.apellido}`)) {
+        throw new ErrorDeUsuario(`El CI ${v.ci} ya está registrado a nombre de ${enBd.nombre} ${enBd.apellido}`)
+      }
+      personaExistenteId = enBd.id
     }
 
     if (tutorId !== null && referencia) {
@@ -416,13 +423,14 @@ export const importTutores = asyncHandler(async (req: Request, res: Response): P
 
     // Tutor nuevo
     const tutor = await prisma.$transaction(async tx => {
-      const persona = await crearPersona(tx, {
-        ci: v.ci, nombre: v.nombre, apellido: v.apellido,
-        email: v.email ?? undefined, telefono: v.telefono ?? undefined,
-      })
+      const personaId = personaExistenteId
+        ?? (await crearPersona(tx, {
+          ci: v.ci, nombre: v.nombre, apellido: v.apellido,
+          email: v.email ?? undefined, telefono: v.telefono ?? undefined,
+        })).id
       const t = await tx.tutor.create({
         data: {
-          personaId: persona.id,
+          personaId,
           ocupacion:        v.ocupacion ?? undefined,
           gradoInstruccion: v.gradoInstruccion ?? undefined,
         },
