@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import './lib/config.js'   // valida JWT_SECRET al arrancar: si falta o es débil, el servidor no inicia
 import express, { type Express } from 'express'
 import cors from 'cors'
 
@@ -31,6 +32,13 @@ import { errorMiddleware } from './middlewares/error.middleware.js'
 
 const app: Express = express()
 
+// Detrás de un proxy (nginx, Render, Railway, Cloudflare...) Express ve la IP
+// del proxy, no la del cliente: el rate limit contaría a TODOS como una sola
+// IP. Se activa solo si defines TRUST_PROXY en el .env (1 = un proxy delante).
+// No lo actives si no hay proxy: permitiría falsificar la IP con X-Forwarded-For.
+const trustProxy = process.env.TRUST_PROXY
+if (trustProxy) app.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy)
+
 // Security
 app.use(helmet())
 
@@ -58,7 +66,11 @@ app.use('/api', limiteGeneral)
 // contra distintas cuentas antes de que el bloqueo por cuenta actúe.
 const limiteLogin = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 15,                   // 15 intentos de login por IP en 15 min
+  limit: 15,                   // 15 intentos FALLIDOS de login por IP en 15 min
+  // Solo cuentan los intentos fallidos: en un colegio muchos estudiantes
+  // comparten la misma IP (wifi/NAT) y con los logins correctos contando,
+  // el curso entero quedaba bloqueado a la 16.ª persona que entraba.
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados intentos de acceso desde esta red. Esperá unos minutos.' },
@@ -73,7 +85,9 @@ app.get('/api/health', (_req, res) => {
 
 // Rutas
 // Auth
-app.use('/api/auth', limiteLogin, authRoutes)
+// El límite va SOLO sobre el login. Antes cubría todo /api/auth (incluidos
+// /me y /password) y además authRoutes estaba montado dos veces.
+app.use('/api/auth/login', limiteLogin)
 app.use('/api/auth',          authRoutes)
 app.use('/api/usuarios',      usuarioRoutes)
 

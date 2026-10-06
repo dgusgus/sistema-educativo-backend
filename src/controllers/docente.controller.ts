@@ -3,7 +3,10 @@ import { prisma } from '../lib/prisma.js'
 import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
 
-import { leerExcel, generarExcel } from '../lib/excel.helper.js'
+import { leerExcel, generarExcel, texto, type ColumnaImport } from '../lib/excel.helper.js'
+import { ejecutarImport, mensajeValidacion } from '../lib/import.helper.js'
+import { ErrorDeUsuario } from '../lib/errores.js'
+import { createDocenteSchema } from '../schemas/persona.schema.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 
 // ─── GET /api/docentes ────────────────────────────────────────────────────────
@@ -370,43 +373,53 @@ export const getMisCursos = async (req: Request, res: Response): Promise<void> =
 // Columnas: CI, Nombre, Apellido, Especialidad, Email, Telefono
 // No crea cuenta de acceso (mismo criterio que createDocente) — la
 // asignación materia+curso tampoco se hace acá, es un paso aparte.
+const COLUMNAS_IMPORT_DOCENTE: ColumnaImport[] = [
+  { clave: 'CI',           obligatoria: true, alias: ['Cedula', 'Carnet', 'Cedula de identidad'] },
+  { clave: 'Nombre',       obligatoria: true, alias: ['Nombres'] },
+  { clave: 'Apellido',     obligatoria: true, alias: ['Apellidos'] },
+  { clave: 'Especialidad' },
+  { clave: 'Email',        alias: ['Correo', 'Correo electronico'] },
+  { clave: 'Telefono',     alias: ['Celular', 'Cel'] },
+]
+
 export const importDocentes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-  if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
-  const filas = await leerExcel(req.file.buffer, req.file.originalname)
+  const { filas, advertencias } = await leerExcel(req.file!.buffer, COLUMNAS_IMPORT_DOCENTE)
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
 
-  const resultado = { totalFilas: filas.length, exitosas: 0, fallidas: 0, creados: [] as unknown[], errores: [] as Array<{ fila: number; error: string }> }
+  const cisEnArchivo = [...new Set(filas.map(f => { try { return texto(f.datos.CI) } catch { return '' } }).filter(Boolean))]
+  const existentes = new Set(
+    (await prisma.persona.findMany({ where: { ci: { in: cisEnArchivo } }, select: { ci: true } }))
+      .map(p => p.ci).filter((ci): ci is string => ci !== null)
+  )
+  const vistos = new Map<string, number>()
 
-  for (const { fila, datos } of filas) {
-    try {
-      const ci       = String(datos['CI'] ?? '').trim()
-      const nombre   = String(datos['Nombre'] ?? '').trim()
-      const apellido = String(datos['Apellido'] ?? '').trim()
-      if (!ci || !nombre || !apellido) throw new Error('CI, Nombre y Apellido son obligatorios')
+  const resultado = await ejecutarImport(filas, async ({ fila, datos }) => {
+    const r = createDocenteSchema.safeParse({
+      ci:           texto(datos.CI),
+      nombre:       texto(datos.Nombre),
+      apellido:     texto(datos.Apellido),
+      especialidad: texto(datos.Especialidad) || undefined,
+      email:        texto(datos.Email) || undefined,
+      telefono:     texto(datos.Telefono) || undefined,
+    })
+    if (!r.success) throw new ErrorDeUsuario(mensajeValidacion(r.error.issues))
+    const v = r.data
 
-      const yaExiste = await buscarPersonaPorCi(ci)
-      if (yaExiste) throw new Error(`Ya existe una persona con CI ${ci}`)
+    const previa = vistos.get(v.ci)
+    if (previa !== undefined) throw new ErrorDeUsuario(`CI duplicado en el archivo (ya aparece en la fila ${previa})`)
+    vistos.set(v.ci, fila)
+    if (existentes.has(v.ci)) throw new ErrorDeUsuario(`Ya existe una persona con CI ${v.ci}`)
 
-      const docente = await prisma.$transaction(async tx => {
-        const persona = await crearPersona(tx, {
-          ci, nombre, apellido,
-          email:    datos['Email']    ? String(datos['Email'])    : undefined,
-          telefono: datos['Telefono'] ? String(datos['Telefono']) : undefined,
-        })
-        return tx.docente.create({
-          data: { personaId: persona.id, especialidad: datos['Especialidad'] ? String(datos['Especialidad']) : undefined },
-        })
+    return prisma.$transaction(async tx => {
+      const persona = await crearPersona(tx, {
+        ci: v.ci, nombre: v.nombre, apellido: v.apellido,
+        email: v.email ?? undefined, telefono: v.telefono ?? undefined,
       })
+      return tx.docente.create({ data: { personaId: persona.id, especialidad: v.especialidad ?? undefined } })
+    })
+  })
 
-      resultado.creados.push(docente)
-      resultado.exitosas++
-    } catch (e) {
-      resultado.fallidas++
-      resultado.errores.push({ fila, error: e instanceof Error ? e.message : 'Error desconocido' })
-    }
-  }
-
-  res.status(200).json(resultado)
+  res.status(200).json({ ...resultado, advertencias })
 })
 
 // ─── GET /api/docentes/export ──────────────────────────────────────────────
@@ -426,10 +439,20 @@ export const exportDocentes = asyncHandler(async (req: Request, res: Response): 
   res.send(buffer)
 })
 
-export const plantillaDocentes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+export const plantillaDocentes = asyncHandler(async (_req: Request, res: Response): Promise<void> => {
   const columnas = ['CI', 'Nombre', 'Apellido', 'Especialidad', 'Email', 'Telefono']
   const ejemplo  = { CI: '3456789', Nombre: 'Carlos', Apellido: 'Flores Huanca', Especialidad: 'Inglés y Ed. Física', Email: 'cflores@correo.com', Telefono: '70123456' }
-  const buffer = await generarExcel('Plantilla', columnas, [ejemplo])
+  const buffer = await generarExcel('Plantilla', columnas, [ejemplo], {
+    columnasTexto: ['CI', 'Telefono'],
+    instrucciones: [
+      { columna: 'CI',           obligatoria: true,  descripcion: 'Cédula de identidad (con complemento si lo tiene)', ejemplo: '3456789' },
+      { columna: 'Nombre',       obligatoria: true,  descripcion: 'Nombres del docente', ejemplo: 'Carlos' },
+      { columna: 'Apellido',     obligatoria: true,  descripcion: 'Apellidos del docente', ejemplo: 'Flores Huanca' },
+      { columna: 'Especialidad', obligatoria: false, descripcion: 'Área o materias que enseña', ejemplo: 'Inglés y Ed. Física' },
+      { columna: 'Email',        obligatoria: false, descripcion: 'Correo electrónico', ejemplo: 'cflores@correo.com' },
+      { columna: 'Telefono',     obligatoria: false, descripcion: 'Un solo número (dígitos, + - ( ) y espacios)', ejemplo: '70123456' },
+    ],
+  })
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', 'attachment; filename="plantilla_docentes.xlsx"')
   res.send(buffer)

@@ -7,7 +7,7 @@ import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { generarBoletinGeneral } from '../services/boletin.service.js'
 import { obtenerMejoresEstudiantes as calcularMejoresEstudiantes } from '../services/boletin.service.js'
-import { esDocenteDelCurso, esFamiliaDeEstudiante } from '../lib/ownership.helper.js'
+import { esDocenteDelCurso, esFamiliaDeEstudiante, puedeVerEstudiante } from '../lib/ownership.helper.js'
 import { obtenerDetalleBoletinEstudiante } from '../services/boletin.service.js'
  
 
@@ -26,27 +26,13 @@ export const generarBoletin = async (req: Request, res: Response): Promise<void>
   const trimestreId = Number(req.params.trimestreId)
 
   try {
-    // ✅ RBAC de pertenencia — Director/Secretaria pasan sin filtro; una
-    // cuenta que SOLO tiene ESTUDIANTE y/o TUTOR (nunca ambas cosas con
-    // Director/Secretaria) debe demostrar que el estudianteId de la URL
-    // es el suyo propio o el de un hijo/tutorado vinculado. Sin esto,
-    // cualquier estudiante o tutor autenticado podía cambiar el número
-    // en la URL y descargar el boletín de otro estudiante cualquiera.
-    const soloFamilia = req.user!.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))
-
-    if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
-      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
-      if (!estudiante || estudiante.id !== estudianteId) {
-        res.status(403).json({ error: 'Sin permisos para ver el boletín de este estudiante' })
-        return
-      }
-    } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
-      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId } })
-      if (!vinculo) {
-        res.status(403).json({ error: 'Sin permisos para ver el boletín de este estudiante' })
-        return
-      }
+    // RBAC de pertenencia — regla única en ownership.helper.ts.
+    // Director/Secretaria pasan; el estudiante solo ve el suyo; el tutor solo
+    // el de sus tutorados vinculados. Antes, un tutor SIN perfil o un usuario
+    // con roles mezclados (ESTUDIANTE+DOCENTE) saltaba esta validación.
+    if (!(await puedeVerEstudiante(req, estudianteId))) {
+      res.status(403).json({ error: 'Sin permisos para ver el boletín de este estudiante' })
+      return
     }
 
     const trimestre = await prisma.trimestre.findUnique({
@@ -477,22 +463,11 @@ export const generarLibreta = async (req: Request, res: Response): Promise<void>
  
   try {
     // Mismo chequeo de pertenencia que generarBoletin() de arriba.
-    const soloFamilia = req.user!.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))
-    if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
-      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
-      if (!estudiante || estudiante.id !== estudianteId) {
-        res.status(403).json({ error: 'Sin permisos para ver la libreta de este estudiante' })
-        return
-      }
-    } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
-      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId } })
-      if (!vinculo) {
-        res.status(403).json({ error: 'Sin permisos para ver la libreta de este estudiante' })
-        return
-      }
+    if (!(await puedeVerEstudiante(req, estudianteId))) {
+      res.status(403).json({ error: 'Sin permisos para ver la libreta de este estudiante' })
+      return
     }
- 
+
     const inscripcion = await prisma.inscripcion.findFirst({
       where: { estudianteId, gestionId },
       include: { estudiante: { include: { persona: true } }, curso: true, gestion: true },

@@ -3,7 +3,7 @@ import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
-import { esDocenteDeAsignacion } from '../lib/ownership.helper.js'
+import { esDocenteDeAsignacion, miEstudianteId, puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 // ─── GET /api/calificaciones ──────────────────────────────────────────────────
 // Planilla del docente: promedio ya calculado (ver evaluacion.controller.ts
@@ -303,36 +303,21 @@ export const getCalificacionesEstudiante = async (req: Request, res: Response): 
   }
 
   try {
-    let estId: number
-    const soloFamilia = req.user ? req.user.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r)) : false
+    // Si no mandan estudianteId, un ESTUDIANTE ve lo suyo (comportamiento
+    // anterior, el frontend lo usa así). Cualquier otro caso lo exige.
+    let estId: number | null = estudianteId !== undefined ? Number(estudianteId) : await miEstudianteId(req)
 
-    if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
-      const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
-      if (!estudiante) {
-        res.status(403).json({ error: 'Perfil de estudiante no encontrado' })
-        return
-      }
-      estId = estudiante.id
-
-    } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
-      if (!estudianteId) {
-        res.status(400).json({ error: 'estudianteId es requerido' })
-        return
-      }
-      const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-      const vinculo = await prisma.tutorEstudiante.findFirst({ where: { tutorId: tutor?.id, estudianteId: Number(estudianteId) } })
-      if (!vinculo) {
-        res.status(403).json({ error: 'Sin permisos para ver este estudiante' })
-        return
-      }
-      estId = Number(estudianteId)
-
-    } else {
-      if (!estudianteId) {
-        res.status(400).json({ error: 'estudianteId es requerido' })
-        return
-      }
-      estId = Number(estudianteId)
+    if (estId === null) {
+      res.status(400).json({ error: 'estudianteId es requerido' })
+      return
+    }
+    if (!Number.isInteger(estId)) {
+      res.status(400).json({ error: 'estudianteId inválido' })
+      return
+    }
+    if (!(await puedeVerEstudiante(req, estId))) {
+      res.status(403).json({ error: 'Sin permisos para ver este estudiante' })
+      return
     }
 
     const inscripciones = await prisma.inscripcion.findMany({

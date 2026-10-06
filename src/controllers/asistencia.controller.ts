@@ -4,7 +4,7 @@ import { aplanarPersona } from '../lib/persona.helper.js'
 import { validarContextoAcademicoLote } from '../lib/contexto-academico.helper.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
-import { esDocenteDeAsignacion, esDocenteDelCurso, esFamiliaDeEstudiante } from '../lib/ownership.helper.js'
+import { esDocenteDeAsignacion, esDocenteDelCurso, esFamiliaDeEstudiante, miEstudianteId, estudiantesDeMiTutoria, puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 const ESTADOS_VALIDOS = ['PRESENTE', 'AUSENTE', 'RETRASO', 'JUSTIFICADO']
 
@@ -217,40 +217,45 @@ export const getHistorial = asyncHandler(async (req: Request, res: Response): Pr
     docenteMateriaCursoId?: string
   }
 
-  let inscripcionIds: number[] = []
-  const soloFamilia = req.user ? req.user.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r)) : false
+  // Qué estudiantes se consultan:
+  //  - Con ?estudianteId=X → solo si puedeVerEstudiante (admin, él mismo,
+  //    su tutor vinculado o un docente de su curso). Antes, en el caso del
+  //    tutor, el filtro `estudianteId` del query PISABA al filtro de sus
+  //    tutorados (misma clave en el objeto) y podía leer a cualquier niño.
+  //  - Sin ?estudianteId → el estudiante ve lo suyo; el tutor ve a todos sus
+  //    tutorados; el resto debe indicar un estudiante.
+  let estudianteIds: number[]
 
-  if (soloFamilia && req.user!.roles.includes('ESTUDIANTE')) {
-    const estudiante = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
-    if (!estudiante) {
-      res.status(403).json({ error: 'Perfil de estudiante no encontrado' })
+  if (estudianteId !== undefined) {
+    const id = Number(estudianteId)
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'estudianteId inválido' })
       return
     }
-    const inscripciones = await prisma.inscripcion.findMany({ where: { estudianteId: estudiante.id }, select: { id: true } })
-    inscripcionIds = inscripciones.map(i => i.id)
-
-  } else if (soloFamilia && req.user!.roles.includes('TUTOR')) {
-    const tutor = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-    if (!tutor) {
-      res.status(403).json({ error: 'Perfil de tutor no encontrado' })
+    if (!(await puedeVerEstudiante(req, id))) {
+      res.status(403).json({ error: 'Sin permisos para ver la asistencia de este estudiante' })
       return
     }
-    const vinculos = await prisma.tutorEstudiante.findMany({ where: { tutorId: tutor.id }, select: { estudianteId: true } })
-    const estIds = vinculos.map(v => v.estudianteId)
-    const inscripciones = await prisma.inscripcion.findMany({
-      where: { estudianteId: { in: estIds }, ...(estudianteId && { estudianteId: Number(estudianteId) }) },
-      select: { id: true },
-    })
-    inscripcionIds = inscripciones.map(i => i.id)
-
+    estudianteIds = [id]
   } else {
-    if (!estudianteId) {
-      res.status(400).json({ error: 'estudianteId es requerido' })
-      return
+    const propio = await miEstudianteId(req)
+    if (propio !== null) {
+      estudianteIds = [propio]
+    } else {
+      const tutorados = await estudiantesDeMiTutoria(req)
+      if (tutorados.length === 0) {
+        res.status(400).json({ error: 'estudianteId es requerido' })
+        return
+      }
+      estudianteIds = tutorados
     }
-    const inscripciones = await prisma.inscripcion.findMany({ where: { estudianteId: Number(estudianteId) }, select: { id: true } })
-    inscripcionIds = inscripciones.map(i => i.id)
   }
+
+  const inscripciones = await prisma.inscripcion.findMany({
+    where: { estudianteId: { in: estudianteIds } },
+    select: { id: true },
+  })
+  const inscripcionIds = inscripciones.map(i => i.id)
 
   const asistencias = await prisma.asistencia.findMany({
     where: {
@@ -353,8 +358,11 @@ export const getReporteCurso = asyncHandler(async (req: Request, res: Response):
       estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } },
       resumenAsistencias: {
         include: {
-          docenteMateriaCurso: { include: { materia: { select: { nombre: true } } } },
-          trimestre: { select: { numero: true, nombre: true } },
+          // id incluidos: el frontend agrupa/filtra por trimestre.id y materia.id
+          // (columnas de la tabla por curso y ranking por trimestre). Sin ellos
+          // los 3 trimestres se fundían en una sola columna.
+          docenteMateriaCurso: { include: { materia: { select: { id: true, nombre: true } } } },
+          trimestre: { select: { id: true, numero: true, nombre: true } },
         },
       },
     },

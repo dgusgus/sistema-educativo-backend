@@ -2,9 +2,14 @@ import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 import { crearPersona, buscarPersonaPorCi, aplanarPersona, validarPersona } from '../lib/persona.helper.js'
 import type { PersonaInput } from '../lib/persona.helper.js'
-import { leerExcel, generarExcel } from '../lib/excel.helper.js'
+import { leerExcel, generarExcel, texto, fecha, type ColumnaImport } from '../lib/excel.helper.js'
+import { ejecutarImport, mensajeValidacion } from '../lib/import.helper.js'
+import { ErrorDeUsuario } from '../lib/errores.js'
+import { createEstudianteSchema } from '../schemas/persona.schema.js'
+import { id as idSchema } from '../schemas/common.schema.js'
 import { codigoCurso } from '../lib/curso.helper.js'   // si no existe en el backend, es el mismo que ya armamos del lado frontend — vale la pena tenerlo también acá
 import { asyncHandler } from '../lib/asyncHandler.js'
+import { puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 // ─── GET /api/estudiantes ─────────────────────────────────────────────────────
 export const getEstudiantes = async (req: Request, res: Response): Promise<void> => {
@@ -88,31 +93,14 @@ export const getEstudianteById = async (req: Request, res: Response): Promise<vo
     return
   }
 
-  // Control RBAC: si el usuario SOLO tiene roles de familia (estudiante
-  // y/o tutor, sin ningún rol de staff), solo puede ver su propia info.
-  const soloFamilia = req.user
-    ? req.user.roles.every(r => ['ESTUDIANTE', 'TUTOR'].includes(r))
-    : false
-
-  if (soloFamilia) {
-    if (req.user!.roles.includes('TUTOR')) {
-      const tutorDelUsuario = await prisma.tutor.findFirst({ where: { usuarioId: req.user!.id } })
-      if (tutorDelUsuario) {
-        const vinculo = await prisma.tutorEstudiante.findFirst({
-          where: { tutorId: tutorDelUsuario.id, estudianteId: id },
-        })
-        if (!vinculo) {
-          res.status(403).json({ error: 'Sin permisos para ver este estudiante' })
-          return
-        }
-      }
-    } else {
-      const estudianteDelUsuario = await prisma.estudiante.findFirst({ where: { usuarioId: req.user!.id } })
-      if (estudianteDelUsuario?.id !== id) {
-        res.status(403).json({ error: 'Solo puedes ver tu propia información' })
-        return
-      }
-    }
+  // Control de pertenencia (regla única en ownership.helper.ts):
+  // admin, el propio estudiante, su tutor vinculado, o un docente que
+  // enseña en un curso donde el estudiante está inscrito.
+  // Antes: un tutor sin perfil, un docente o un usuario con roles mezclados
+  // (p. ej. ESTUDIANTE+DOCENTE) podían ver la ficha de cualquier estudiante.
+  if (!(await puedeVerEstudiante(req, id))) {
+    res.status(403).json({ error: 'Sin permisos para ver este estudiante' })
+    return
   }
 
   try {
@@ -479,62 +467,76 @@ export const eliminarInscripcion = async (req: Request, res: Response): Promise<
 }
 
 // ─── POST /api/estudiantes/import ──────────────────────────────────────────
-// Columnas esperadas: CI, Nombre, Apellido, FechaNacimiento, Direccion, RUDE, Curso
-// (Curso en formato corto "1AS" — mismo código que ya usa el frontend)
-export const importEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-  if (!req.file) { res.status(400).json({ error: 'Adjunta un archivo .xlsx' }); return }
-  if (!req.body.gestionId) { res.status(400).json({ error: 'gestionId es obligatorio' }); return }
-  const gestionId = Number(req.body.gestionId)
-  if (!Number.isInteger(gestionId)) { res.status(400).json({ error: 'gestionId debe ser un número' }); return }
+// Columnas: CI, Nombre, Apellido, FechaNacimiento, Direccion, RUDE, Curso
+// (Curso en formato corto "1AS" — mismo código que ya usa el frontend).
+// No crea cuenta de acceso: las cuentas se gestionan aparte.
+const COLUMNAS_IMPORT_ESTUDIANTE: ColumnaImport[] = [
+  { clave: 'CI',              obligatoria: true, alias: ['Cedula', 'Carnet', 'Cedula de identidad'] },
+  { clave: 'Nombre',          obligatoria: true, alias: ['Nombres'] },
+  { clave: 'Apellido',        obligatoria: true, alias: ['Apellidos'] },
+  { clave: 'FechaNacimiento', alias: ['Fecha de nacimiento', 'Fecha nac', 'Nacimiento'] },
+  { clave: 'Direccion',       alias: ['Domicilio'] },
+  { clave: 'RUDE' },
+  { clave: 'Curso' },
+]
 
-  const filas = await leerExcel(req.file.buffer, req.file.originalname)
+export const importEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const gest = idSchema.safeParse(req.body?.gestionId)
+  if (!gest.success) { res.status(400).json({ error: 'gestionId es obligatorio y debe ser un número válido' }); return }
+  const gestionId = gest.data
+
+  const gestion = await prisma.gestion.findUnique({ where: { id: gestionId }, select: { id: true } })
+  if (!gestion) { res.status(404).json({ error: 'Gestión no encontrada' }); return }
+
+  const { filas, advertencias } = await leerExcel(req.file!.buffer, COLUMNAS_IMPORT_ESTUDIANTE)
   if (filas.length === 0) { res.status(400).json({ error: 'El archivo no tiene filas de datos' }); return }
 
   const cursos = await prisma.curso.findMany({ where: { gestionId } })
   const cursoPorCodigo = new Map(cursos.map(c => [codigoCurso(c), c]))
 
-  const resultado = { totalFilas: filas.length, exitosas: 0, fallidas: 0, creados: [] as unknown[], errores: [] as Array<{ fila: number; error: string }> }
+  // Una sola consulta para saber qué CI ya existen (antes: una consulta por fila)
+  const cisEnArchivo = [...new Set(filas.map(f => { try { return texto(f.datos.CI) } catch { return '' } }).filter(Boolean))]
+  const existentes = new Set(
+    (await prisma.persona.findMany({ where: { ci: { in: cisEnArchivo } }, select: { ci: true } }))
+      .map(p => p.ci).filter((ci): ci is string => ci !== null)
+  )
+  const vistos = new Map<string, number>()   // CI → fila donde apareció primero
 
-  for (const { fila, datos } of filas) {
-    try {
-      const ci        = String(datos['CI'] ?? '').trim()
-      const nombre    = String(datos['Nombre'] ?? '').trim()
-      const apellido  = String(datos['Apellido'] ?? '').trim()
-      const cursoCod  = String(datos['Curso'] ?? '').trim().toUpperCase()
+  const resultado = await ejecutarImport(filas, async ({ fila, datos }) => {
+    // Mismas reglas que la API (CI, largos, formatos), con el nombre de columna del Excel en el mensaje
+    const r = createEstudianteSchema.safeParse({
+      ci:              texto(datos.CI),
+      nombre:          texto(datos.Nombre),
+      apellido:        texto(datos.Apellido),
+      fechaNacimiento: fecha(datos.FechaNacimiento, 'FechaNacimiento') ?? undefined,
+      direccion:       texto(datos.Direccion) || undefined,
+      rude:            texto(datos.RUDE) || undefined,
+    })
+    if (!r.success) throw new ErrorDeUsuario(mensajeValidacion(r.error.issues))
+    const v = r.data
 
-      if (!ci || !nombre || !apellido) throw new Error('CI, Nombre y Apellido son obligatorios')
+    const previa = vistos.get(v.ci)
+    if (previa !== undefined) throw new ErrorDeUsuario(`CI duplicado en el archivo (ya aparece en la fila ${previa})`)
+    vistos.set(v.ci, fila)
+    if (existentes.has(v.ci)) throw new ErrorDeUsuario(`Ya existe una persona con CI ${v.ci}`)
 
-      const yaExiste = await prisma.persona.findUnique({ where: { ci } })
-      if (yaExiste) throw new Error(`Ya existe una persona con CI ${ci}`)
+    const cursoCod = texto(datos.Curso).replace(/\s+/g, '').toUpperCase()
+    const curso = cursoCod ? cursoPorCodigo.get(cursoCod) : undefined
+    if (cursoCod && !curso) throw new ErrorDeUsuario(`Curso "${cursoCod}" no encontrado en esta gestión`)
 
-      const curso = cursoPorCodigo.get(cursoCod)
-      if (cursoCod && !curso) throw new Error(`Curso "${cursoCod}" no encontrado en esta gestión`)
-
-      const estudiante = await prisma.$transaction(async tx => {
-        const persona = await tx.persona.create({
-          data: {
-            ci, nombre, apellido,
-            direccion: datos['Direccion'] ? String(datos['Direccion']) : undefined,
-          },
-        })
-        const est = await tx.estudiante.create({
-          data: { personaId: persona.id, rude: datos['RUDE'] ? String(datos['RUDE']) : undefined },
-        })
-        if (curso) {
-          await tx.inscripcion.create({ data: { estudianteId: est.id, cursoId: curso.id, gestionId } })
-        }
-        return est
+    return prisma.$transaction(async tx => {
+      const persona = await crearPersona(tx, {
+        ci: v.ci, nombre: v.nombre, apellido: v.apellido,
+        fechaNacimiento: v.fechaNacimiento,
+        direccion: v.direccion ?? undefined,
       })
+      const est = await tx.estudiante.create({ data: { personaId: persona.id, rude: v.rude ?? undefined } })
+      if (curso) await tx.inscripcion.create({ data: { estudianteId: est.id, cursoId: curso.id, gestionId } })
+      return est
+    })
+  })
 
-      resultado.creados.push(estudiante)
-      resultado.exitosas++
-    } catch (e) {
-      resultado.fallidas++
-      resultado.errores.push({ fila, error: e instanceof Error ? e.message : 'Error desconocido' })
-    }
-  }
-
-  res.status(200).json(resultado)
+  res.status(200).json({ ...resultado, advertencias })
 })
 
 // ─── GET /api/estudiantes/export?gestionId= ────────────────────────────────
@@ -566,10 +568,26 @@ export const exportEstudiantes = asyncHandler(async (req: Request, res: Response
 })
 
 // ─── GET /api/estudiantes/plantilla ────────────────────────────────────────
-export const plantillaEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+export const plantillaEstudiantes = asyncHandler(async (_req: Request, res: Response): Promise<void> => {
   const columnas = ['CI', 'Nombre', 'Apellido', 'FechaNacimiento', 'Direccion', 'RUDE', 'Curso']
-  const ejemplo  = { CI: '4567890', Nombre: 'Sofía', Apellido: 'Condori Mamani', FechaNacimiento: '15/03/2010', Direccion: 'Av. 6 de Agosto 123', RUDE: '12345678', Curso: '1AS' }
-  const buffer = await generarExcel('Plantilla', columnas, [ejemplo])
+  const ejemplo  = {
+    CI: '4567890', Nombre: 'Sofía', Apellido: 'Condori Mamani',
+    FechaNacimiento: new Date(Date.UTC(2010, 2, 15)),   // fecha REAL de Excel, se ve 15/03/2010
+    Direccion: 'Av. 6 de Agosto 123', RUDE: '12345678', Curso: '1AS',
+  }
+  const buffer = await generarExcel('Plantilla', columnas, [ejemplo], {
+    columnasTexto: ['CI', 'RUDE', 'Curso'],      // formato Texto: no se pierden los ceros a la izquierda
+    columnasFecha: ['FechaNacimiento'],
+    instrucciones: [
+      { columna: 'CI',              obligatoria: true,  descripcion: 'Cédula de identidad (con complemento si lo tiene)', ejemplo: '4567890' },
+      { columna: 'Nombre',          obligatoria: true,  descripcion: 'Nombres del estudiante', ejemplo: 'Sofía' },
+      { columna: 'Apellido',        obligatoria: true,  descripcion: 'Apellidos del estudiante', ejemplo: 'Condori Mamani' },
+      { columna: 'FechaNacimiento', obligatoria: false, descripcion: 'dd/mm/aaaa, con año de 4 dígitos', ejemplo: '15/03/2010' },
+      { columna: 'Direccion',       obligatoria: false, descripcion: 'Domicilio', ejemplo: 'Av. 6 de Agosto 123' },
+      { columna: 'RUDE',            obligatoria: false, descripcion: 'Código RUDE', ejemplo: '12345678' },
+      { columna: 'Curso',           obligatoria: false, descripcion: 'Código del curso en la gestión elegida: grado + paralelo + P (primaria) o S (secundaria). Vacío = se crea sin inscripción', ejemplo: '1AS' },
+    ],
+  })
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', 'attachment; filename="plantilla_estudiantes.xlsx"')
   res.send(buffer)

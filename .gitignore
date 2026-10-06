@@ -13,3 +13,6 @@ prisma/generated/
 docs/
 *.agents
 *skills-lock.json
+# Copias de referencia de cambios ya aplicados en src/ (ver README conservado abajo)
+cambios/*
+!cambios/README_CAMBIOS.md
