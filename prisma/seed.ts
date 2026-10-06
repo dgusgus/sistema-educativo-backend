@@ -11,6 +11,17 @@
 //   (abierto, ~85% calificado → pendientes con nombres + cierre manual como prueba).
 //   Gestión siguiente creada INACTIVA y vacía para probar promoción / activación.
 //
+// PERFILES DE SEED (situaciones de prueba — se combinan por ejecución,
+// sin flags = DEFENSA, el dataset de siempre):
+//   (default)                   T3 al ~85% → pendientes con nombres + cierre que rechaza
+//   SEED_T3_COMPLETO=si         T3 al 100% → cerrar desde el sistema completa el año
+//   SEED_ANCLA=2025-08-31       reproduce el dataset fijo anterior
+//   SEED_PASSWORD_DEMO=<clave>  demo público (todas las cuentas con esa clave)
+// REGLAS: el default nunca cambia; un flag = una variación documentada aquí y en
+// .env.example; la VERIFICACIÓN espera lo de cada perfil (si falla, sale con código 1).
+// Candidatos futuros (solo cuando haya caso real): SEED_SIN_PAGOS, SEED_CURSO_VACIO,
+// SEED_GESTION_CERRADA.
+//
 // FECHAS: todo se calcula respecto a una ANCLA (por defecto, la fecha de HOY), así el
 // dashboard se ve "vivo" (el trimestre abierto incluye hoy, nada aparece como vencido).
 // Para reproducir EXACTAMENTE el dataset fijo de siempre (gestión 2025):
@@ -93,6 +104,11 @@ function parseAncla(v?: string): Date {
 }
 const ANCLA = parseAncla(process.env.SEED_ANCLA)
 const ANIO  = ANCLA.getUTCFullYear()
+
+// Perfil de cierre (ver tabla en la cabecera): con SEED_T3_COMPLETO=si el T3 se
+// siembra al 100% para probar el cierre completo desde el sistema; por defecto
+// queda al ~85% con pendientes con nombre para la demo de defensa.
+const T3_COMPLETO = (process.env.SEED_T3_COMPLETO ?? '').trim().toLowerCase() === 'si'
 
 // Todas las fechas se construyen con Date.UTC: new Date(año, mes, día) usa la hora LOCAL y,
 // en una zona al este de UTC, la columna DATE quedaba un día antes (asistencia en domingo).
@@ -604,7 +620,7 @@ async function main() {
         for (const dn of dimNombres) {
           const aid = actId.get(`${dmc.id}-${tid}-${(dimsAct[dn] as { id: number }).id}`)!
           for (const e of (inscPorCurso[dmc.cursoIdx] ?? [])) {
-            if (tnum === 3 && e.globalIdx % 7 === 0) continue // T3 parcial → pendientes
+            if (!T3_COMPLETO && tnum === 3 && e.globalIdx % 7 === 0) continue // T3 parcial → pendientes
             let f = frac(e.globalIdx, tnum, dmc.id % 5)
             if (empate.includes(e.globalIdx) && tnum <= 2) f = tnum === 1 ? 0.8 : 0.82
             const nota = Math.round(dimMax[dn] * f * 100) / 100
@@ -823,7 +839,11 @@ async function main() {
   const t3SinNota = await prisma.inscripcion.count({
     where: { gestionId: gAct.id, estadoInscripcion: 'ACTIVA', calificaciones: { none: { trimestreId: trimsAct[3].id } } },
   })
-  verificar('T3 sin calificar (pendientes demo)', t3SinNota > 0, `${t3SinNota} (esperado > 0)`)
+  verificar(
+    T3_COMPLETO ? 'T3 sin calificar (cierre completo)' : 'T3 sin calificar (pendientes demo)',
+    T3_COMPLETO ? t3SinNota === 0 : t3SinNota > 0,
+    `${t3SinNota} (esperado ${T3_COMPLETO ? 0 : '> 0'})`,
+  )
 
   const sumaPesos = await prisma.dimensionEvaluacion.aggregate({ where: { gestionId: gAct.id }, _sum: { pesoEnPromedio: true } })
   verificar('suma de pesos de dimensiones', Number(sumaPesos._sum.pesoEnPromedio) === 1, `${Number(sumaPesos._sum.pesoEnPromedio)} (esperado 1)`)
@@ -868,7 +888,9 @@ async function main() {
   console.log('  Valeria → sin pagos · Pedro → matrícula PARCIAL · 1 PENDIENTE · perfiles ~50% asistencia (con justificadas)')
   console.log('  Empate exacto en 1°A T1/T2 (ranking) · QUECHUA sin asignar · Ruth Limachi sin carga')
   console.log('  Horarios completos en 1°A, 1°B, 2°A, 2°B (sin choques) · boletín agrupado por campo de saber')
-  console.log('  T3 = mes en curso, ~85% calificado: cerrar desde la UI debe pedir lo faltante (widget con nombres)')
+  console.log(T3_COMPLETO
+    ? '  T3 = mes en curso, 100% calificado: cerrar desde la UI debe completarse y materializar PromedioFinal'
+    : '  T3 = mes en curso, ~85% calificado: cerrar desde la UI debe pedir lo faltante (widget con nombres)')
   console.log(`  Gestión ${ANIO + 1} inactiva y vacía: probar promoción + propuesta de inscripciones + activación`)
 }
 
