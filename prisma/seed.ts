@@ -638,7 +638,7 @@ async function main() {
       for (const tid of trimIds) {
         const tnum = trimNum[tid]
         for (const e of (inscPorCurso[dmc.cursoIdx] ?? [])) {
-          if (tnum === 3 && e.globalIdx % 7 === 0) continue
+          if (!T3_COMPLETO && tnum === 3 && e.globalIdx % 7 === 0) continue
           let f = frac(e.globalIdx, tnum, dmc.id % 5)
           if (empate.includes(e.globalIdx) && tnum <= 2) f = tnum === 1 ? 0.8 : 0.82
           califs.push({ inscripcionId: e.inscId, docenteMateriaCursoId: dmc.id, trimestreId: tid, promedioTrimestral: Math.round(f * 100 * 100) / 100 })
@@ -653,7 +653,7 @@ async function main() {
       for (const tid of trimIds) {
         const tnum = trimNum[tid]
         for (const e of (inscPorCurso[dmc.cursoIdx] ?? [])) {
-          if (tnum === 3 && e.globalIdx % 7 === 0) continue
+          if (!T3_COMPLETO && tnum === 3 && e.globalIdx % 7 === 0) continue
           let f = frac(e.globalIdx, tnum, dmc.id % 5)
           if (empate.includes(e.globalIdx) && tnum <= 2) f = tnum === 1 ? 0.8 : 0.82
           const cid = calId.get(`${e.inscId}-${dmc.id}-${tid}`)!
