@@ -109,6 +109,45 @@ export const getTutorById = async (req: Request, res: Response): Promise<void> =
   }
 }
 
+// GET /api/tutores/mis-vinculados — el tutor autenticado lee SOLO sus
+// estudiantes vinculados, sin necesitar rol admin. Existe porque
+// GET /:id exige DIRECTOR/SECRETARIA y la vista Seguimiento lo llamaba
+// con rol TUTOR (siempre 403). No recibe id: el tutor es el del token,
+// así no hay IDOR posible.
+export const getMisVinculados = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const tutor = await prisma.tutor.findFirst({
+      where: { usuarioId: req.user!.id },
+      include: {
+        persona: true,
+        estudiantes: {
+          include: {
+            estudiante: {
+              include: {
+                persona: { select: { nombre: true, apellido: true, ci: true } },
+              },
+            },
+          },
+        },
+      },
+    })
+    if (!tutor) {
+      res.status(404).json({ error: 'Tu cuenta no tiene perfil de tutor vinculado. Contactá a secretaría.' })
+      return
+    }
+    res.status(200).json({
+      ...aplanarPersona(tutor),
+      estudiantes: tutor.estudiantes.map(e => ({
+        ...e,
+        estudiante: { id: e.estudiante.id, ...e.estudiante.persona },
+      })),
+    })
+  } catch (error) {
+    console.error('[tutor.getMisVinculados]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
 // POST /api/tutores
 export const createTutor = async (req: Request, res: Response): Promise<void> => {
   const { ci, nombre, apellido, telefono, email, ocupacion, gradoInstruccion } = req.body as {

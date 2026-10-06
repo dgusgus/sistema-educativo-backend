@@ -1,7 +1,7 @@
 // src/routes/tutor.routes.ts
 import { Router } from 'express'
 import {
-  getTutores, getTutorById, createTutor, updateTutor,
+  getTutores, getTutorById, getMisVinculados, createTutor, updateTutor,
   vincularEstudiante, desvincularEstudiante,
   importTutores, exportTutores,
   plantillaTutores,
@@ -18,6 +18,10 @@ router.use(authMiddleware)
 router.get('/export',  requireRol('DIRECTOR', 'SECRETARIA'), exportTutores)
 router.get('/plantilla', requireRol('DIRECTOR', 'SECRETARIA'), plantillaTutores)
 router.post('/import', requireRol('DIRECTOR', 'SECRETARIA'), uploadExcel, importTutores)
+
+// El propio tutor lee sus vinculados sin rol admin (va ANTES de /:id
+// para que "mis-vinculados" no se capture como id).
+router.get('/mis-vinculados', requireRol('TUTOR'), getMisVinculados)
 
 router.get('/',    requireRol('DIRECTOR', 'SECRETARIA'), getTutores)
 router.get('/:id', requireRol('DIRECTOR', 'SECRETARIA'), getTutorById)
