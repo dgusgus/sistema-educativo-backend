@@ -2,6 +2,10 @@ import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 import { NIVEL_TEXTO, siguienteNivelGrado } from '../lib/curso.helper.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { ErrorDeUsuario } from '../lib/errores.js'
+import { z } from 'zod'
+import { calcularResultadosGestion, registrarResultadosLote } from '../services/resultado-final.service.js'
 
 // ─── GET /api/gestiones ───────────────────────────────────────────────────────
 export const getGestiones = async (_req: Request, res: Response): Promise<void> => {
@@ -380,3 +384,32 @@ export const getPropuestaInscripciones = async (req: Request, res: Response): Pr
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+
+// ─── GET /api/gestiones/:id/propuesta-resultados ─────────────────────────────
+// Paso 1 de Promoción: calcula, SIN escribir nada, el resultado del año de
+// cada estudiante a partir de los promedios finales de sus materias
+// (reprueba quien tenga alguna materia bajo la nota mínima de la gestión).
+export const getPropuestaResultados = asyncHandler(async (req, res): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) throw new ErrorDeUsuario('id de gestión inválido')
+
+  const calculo = await calcularResultadosGestion(id)
+  res.status(200).json(calculo)
+})
+
+// ─── POST /api/gestiones/:id/resultados ──────────────────────────────────────
+// Registra en lote el resultado del año. El navegador manda SOLO los ids de
+// inscripción: el resultado lo vuelve a calcular el servidor, así que no se
+// puede promover a quien reprobó ni reprobar a quien aprobó.
+const resultadosLoteSchema = z.object({
+  inscripcionIds: z.array(z.number().int().positive()).min(1, 'Selecciona al menos un estudiante').max(2000),
+})
+
+export const registrarResultados = asyncHandler(async (req, res): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) throw new ErrorDeUsuario('id de gestión inválido')
+
+  const { inscripcionIds } = resultadosLoteSchema.parse(req.body)
+  const resultado = await registrarResultadosLote(id, inscripcionIds)
+  res.status(200).json(resultado)
+})

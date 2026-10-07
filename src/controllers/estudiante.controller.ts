@@ -9,6 +9,7 @@ import { createEstudianteSchema } from '../schemas/persona.schema.js'
 import { id as idSchema } from '../schemas/common.schema.js'
 import { codigoCurso } from '../lib/curso.helper.js'   // si no existe en el backend, es el mismo que ya armamos del lado frontend — vale la pena tenerlo también acá
 import { asyncHandler } from '../lib/asyncHandler.js'
+import { calcularResultadoInscripcion } from '../services/resultado-final.service.js'
 import { puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 // ─── GET /api/estudiantes ─────────────────────────────────────────────────────
@@ -327,6 +328,11 @@ export const getInscripcion = async (req: Request, res: Response): Promise<void>
 }
 
 // ─── POST /api/inscripciones/:id/resultado ────────────────────────────────────
+// Registro INDIVIDUAL del resultado del año. El camino normal es el lote del
+// Paso 1 de Promoción (POST /gestiones/:id/resultados); este endpoint queda
+// para scripts y casos puntuales, pero con la MISMA regla: el resultado pedido
+// debe coincidir con el calculado a partir de los promedios finales
+// (services/resultado-final.service.ts). Si no coincide, se rechaza (409).
 export const registrarResultado = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { resultado, observaciones } = req.body as {
@@ -334,25 +340,30 @@ export const registrarResultado = async (req: Request, res: Response): Promise<v
     observaciones?: string
   }
 
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'id de inscripción inválido' })
+    return
+  }
   if (!resultado || !['PROMOVIDO', 'REPROBADO'].includes(resultado)) {
     res.status(400).json({ error: 'resultado debe ser PROMOVIDO o REPROBADO' })
     return
   }
 
   try {
-    const inscripcion = await prisma.inscripcion.findUnique({ where: { id } })
-    if (!inscripcion) {
-      res.status(404).json({ error: 'Inscripción no encontrada' })
+    // Valida también que los trimestres estén cerrados y que existan todos los promedios.
+    const calculo = await calcularResultadoInscripcion(id)
+
+    if (calculo.estado === 'INCOMPLETO' || calculo.sugerido === null) {
+      res.status(400).json({ error: calculo.detalle ?? 'Faltan promedios finales' })
       return
     }
-
-    const trimestresAbiertos = await prisma.trimestre.findMany({
-      where: { gestionId: inscripcion.gestionId, cerrado: false },
-    })
-    if (trimestresAbiertos.length > 0) {
-      res.status(400).json({
-        error: 'No se puede registrar el resultado — hay trimestres sin cerrar',
-        trimestresAbiertos: trimestresAbiertos.map(t => t.nombre),
+    if (calculo.sugerido !== resultado) {
+      const motivo = calculo.materiasReprobadas.length
+        ? `materias reprobadas: ${calculo.materiasReprobadas.map(m => `${m.materia} (${m.promedio})`).join(', ')}`
+        : 'todas las materias están aprobadas'
+      res.status(409).json({
+        error: `El resultado no coincide con los promedios finales: corresponde ${calculo.sugerido} (${motivo})`,
+        sugerido: calculo.sugerido,
       })
       return
     }
@@ -369,6 +380,10 @@ export const registrarResultado = async (req: Request, res: Response): Promise<v
 
     res.status(200).json({ ...updated, estudiante: aplanarPersona(updated.estudiante) })
   } catch (error) {
+    if (error instanceof ErrorDeUsuario) {
+      res.status(error.status).json({ error: error.message })
+      return
+    }
     console.error('[estudiante.registrarResultado]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
