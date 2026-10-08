@@ -10,6 +10,7 @@ import { id as idSchema } from '../schemas/common.schema.js'
 import { codigoCurso } from '../lib/curso.helper.js'   // si no existe en el backend, es el mismo que ya armamos del lado frontend — vale la pena tenerlo también acá
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { calcularResultadoInscripcion } from '../services/resultado-final.service.js'
+import { validarProgresionInscripcion, obtenerHistorialEstudiante } from '../services/progresion.service.js'
 import { puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 // ─── GET /api/estudiantes ─────────────────────────────────────────────────────
@@ -278,6 +279,15 @@ export const inscribirEstudiante = async (req: Request, res: Response): Promise<
       return
     }
 
+    // Progresión: un promovido solo va al grado siguiente, un reprobado repite el
+    // mismo, y nadie retrocede ni se salta un curso (ver services/progresion.service.ts).
+    const gestion = await prisma.gestion.findUnique({ where: { id: gestionId }, select: { anio: true } })
+    if (!gestion) {
+      res.status(404).json({ error: 'Gestión no encontrada' })
+      return
+    }
+    await validarProgresionInscripcion(estudianteId, curso, gestion.anio)
+
     const inscripcion = await prisma.inscripcion.create({
       data: { estudianteId, cursoId, gestionId, procedencia },
       include: {
@@ -292,6 +302,10 @@ export const inscribirEstudiante = async (req: Request, res: Response): Promise<
       estudiante: aplanarPersona(inscripcion.estudiante),
     })
   } catch (error) {
+    if (error instanceof ErrorDeUsuario) {
+      res.status(error.status).json({ error: error.message })
+      return
+    }
     console.error('[estudiante.inscribirEstudiante]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
@@ -606,4 +620,24 @@ export const plantillaEstudiantes = asyncHandler(async (_req: Request, res: Resp
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   res.setHeader('Content-Disposition', 'attachment; filename="plantilla_estudiantes.xlsx"')
   res.send(buffer)
+})
+
+// ─── GET /api/estudiantes/:id/historial ──────────────────────────────────────
+// Recorrido académico del estudiante (una fila por gestión: de dónde viene, a
+// dónde va, resultado y promedio) y qué curso le corresponde a continuación.
+// ?gestionId=N calcula "lo que le corresponde" para ESA gestión (la activa).
+export const getHistorialEstudiante = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) throw new ErrorDeUsuario('id de estudiante inválido')
+
+  let anioDestino: number | undefined
+  if (req.query.gestionId !== undefined) {
+    const gestionId = Number(req.query.gestionId)
+    if (!Number.isInteger(gestionId) || gestionId <= 0) throw new ErrorDeUsuario('gestionId inválido')
+    const gestion = await prisma.gestion.findUnique({ where: { id: gestionId }, select: { anio: true } })
+    if (!gestion) throw new ErrorDeUsuario('Gestión no encontrada', 404)
+    anioDestino = gestion.anio
+  }
+
+  res.status(200).json(await obtenerHistorialEstudiante(id, anioDestino))
 })

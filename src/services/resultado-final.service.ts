@@ -4,10 +4,17 @@
 //
 // REGLA (única fuente de verdad — la usan la vista de Promoción y el
 // registro individual de inscripciones):
-//   · Todas las materias del curso deben tener su PromedioFinal.
+//   · Todas las materias del curso deben tener nota en TODOS los trimestres.
+//   · El promedio final de cada materia es el promedio de sus trimestrales
+//     (promedio-final.helper.ts → promedioFinalDe).
 //   · REPROBADO si ALGUNA materia tiene promedio final menor a
 //     Gestion.notaMinimaAprobacion (51 por defecto).
 //   · PROMOVIDO en cualquier otro caso.
+//
+// Se calcula desde Calificacion.promedioTrimestral (la fuente real) y NO desde
+// la tabla PromedioFinal: esa tabla es una copia que solo se actualiza al
+// cerrar un trimestre o corregir una nota, y si quedara desactualizada se
+// promovería a un estudiante con una materia reprobada.
 //
 // El resultado NUNCA lo elige quien registra: siempre sale de las notas
 // que cargaron los docentes. Así nadie puede promover a un estudiante
@@ -16,12 +23,13 @@
 // Para cambiar la regla (p. ej. permitir hasta N materias reprobadas o
 // un periodo de recuperación) basta con tocar decidirResultado().
 //
-// No requiere cambios en el schema: lee PromedioFinal y escribe solo
-// Inscripcion.resultado, que ya existían.
+// No requiere cambios en el schema. El cálculo es de solo lectura; el registro
+// en lote escribe Inscripcion.resultado y deja PromedioFinal al día.
 
 import { prisma } from '../lib/prisma.js'
 import { ErrorDeUsuario } from '../lib/errores.js'
 import { NIVEL_TEXTO } from '../lib/curso.helper.js'
+import { promedioFinalDe, calcularPromediosFinales, redondear2 } from '../lib/promedio-final.helper.js'
 
 export type ResultadoCalculado = 'PROMOVIDO' | 'REPROBADO'
 export type ResultadoInscripcion = 'PENDIENTE' | ResultadoCalculado
@@ -29,6 +37,12 @@ export type ResultadoInscripcion = 'PENDIENTE' | ResultadoCalculado
 export interface MateriaReprobada {
   materia:  string
   promedio: number
+}
+
+export interface PromedioMateria {
+  materia:  string
+  /** null si todavía faltan trimestres de esa materia. */
+  promedio: number | null
 }
 
 export interface CalculoResultado {
@@ -44,6 +58,8 @@ export interface CalculoResultado {
   sugerido:            ResultadoCalculado | null
   promedioGeneral:     number | null
   totalMaterias:       number
+  /** Todas las materias del curso con su promedio final calculado. */
+  materias:            PromedioMateria[]
   materiasReprobadas:  MateriaReprobada[]
   materiasSinPromedio: string[]
   /** Explicación legible cuando el estado es INCOMPLETO. */
@@ -66,14 +82,12 @@ function decidirResultado(materiasReprobadas: MateriaReprobada[]): ResultadoCalc
   return materiasReprobadas.length > 0 ? 'REPROBADO' : 'PROMOVIDO'
 }
 
-const redondear2 = (n: number) => Math.round(n * 100) / 100
-
 // ─── Cálculo ─────────────────────────────────────────────────────────────────
 // Solo lectura. Exige que todos los trimestres de la gestión estén
 // cerrados (si no, los promedios finales todavía pueden cambiar).
 export async function calcularResultadosGestion(
   gestionId: number,
-  opciones: { inscripcionIds?: number[] } = {},
+  opciones: { inscripcionIds?: number[]; cursoId?: number } = {},
 ): Promise<{ gestion: { id: number; anio: number; notaMinima: number }; resumen: ResumenCalculo; resultados: CalculoResultado[] }> {
   const gestion = await prisma.gestion.findUnique({
     where:  { id: gestionId },
@@ -91,6 +105,12 @@ export async function calcularResultadosGestion(
     )
   }
 
+  // Promoción por curso: se calcula solo el curso pedido (debe ser de esta gestión).
+  if (opciones.cursoId !== undefined) {
+    const curso = await prisma.curso.findFirst({ where: { id: opciones.cursoId, gestionId }, select: { id: true } })
+    if (!curso) throw new ErrorDeUsuario('El curso no existe en esta gestión', 404)
+  }
+
   const notaMinima = Number(gestion.notaMinimaAprobacion)
 
   // CONCLUIDA se incluye a propósito: después de cerrar la gestión todas las
@@ -99,12 +119,12 @@ export async function calcularResultadosGestion(
     where: {
       gestionId,
       estadoInscripcion: { in: ['ACTIVA', 'CONCLUIDA'] },
+      ...(opciones.cursoId !== undefined ? { cursoId: opciones.cursoId } : {}),
       ...(opciones.inscripcionIds ? { id: { in: opciones.inscripcionIds } } : {}),
     },
     include: {
       estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } },
       curso:      { select: { id: true, nivel: true, grado: true, paralelo: true } },
-      promediosFinales: { select: { docenteMateriaCursoId: true, promedioFinal: true } },
     },
     orderBy: [
       { curso: { nivel: 'asc' } },
@@ -126,9 +146,35 @@ export async function calcularResultadosGestion(
     materiasPorCurso.set(a.cursoId, lista)
   }
 
+  // Notas de cada trimestre: inscripción → materia → (trimestre → promedio).
+  const totalTrimestres = await prisma.trimestre.count({ where: { gestionId } })
+  const calificaciones = await prisma.calificacion.findMany({
+    where: {
+      docenteMateriaCurso: { gestionId },
+      promedioTrimestral:  { not: null },
+      inscripcionId:       { in: inscripciones.map(i => i.id) },
+    },
+    select: { inscripcionId: true, docenteMateriaCursoId: true, trimestreId: true, promedioTrimestral: true },
+  })
+  const notas = new Map<number, Map<number, Map<number, number>>>()
+  for (const c of calificaciones) {
+    const porMateria   = notas.get(c.inscripcionId) ?? new Map<number, Map<number, number>>()
+    const porTrimestre = porMateria.get(c.docenteMateriaCursoId) ?? new Map<number, number>()
+    porTrimestre.set(c.trimestreId, Number(c.promedioTrimestral))
+    porMateria.set(c.docenteMateriaCursoId, porTrimestre)
+    notas.set(c.inscripcionId, porMateria)
+  }
+
   const resultados: CalculoResultado[] = inscripciones.map(insc => {
-    const esperadas   = materiasPorCurso.get(insc.curso.id) ?? []
-    const promedios   = new Map(insc.promediosFinales.map(p => [p.docenteMateriaCursoId, Number(p.promedioFinal)]))
+    const esperadas = materiasPorCurso.get(insc.curso.id) ?? []
+
+    // Promedio final de cada materia, calculado en el momento (null = faltan trimestres).
+    const promedios = new Map<number, number>()
+    for (const m of esperadas) {
+      const trimestres = notas.get(insc.id)?.get(m.id)
+      const final = trimestres ? promedioFinalDe([...trimestres.values()], totalTrimestres) : null
+      if (final !== null) promedios.set(m.id, final)
+    }
 
     const sinPromedio = esperadas.filter(m => !promedios.has(m.id)).map(m => m.nombre)
     const reprobadas: MateriaReprobada[] = esperadas
@@ -140,7 +186,7 @@ export async function calcularResultadosGestion(
 
     let detalle: string | null = null
     if (esperadas.length === 0)    detalle = 'El curso no tiene materias asignadas'
-    else if (sinPromedio.length)   detalle = `Falta el promedio final de: ${sinPromedio.join(', ')}`
+    else if (sinPromedio.length)   detalle = `Faltan notas de algún trimestre en: ${sinPromedio.join(', ')}`
 
     const listo = detalle === null
 
@@ -155,6 +201,7 @@ export async function calcularResultadosGestion(
       sugerido:            listo ? decidirResultado(reprobadas) : null,
       promedioGeneral,
       totalMaterias:       esperadas.length,
+      materias:            esperadas.map(m => ({ materia: m.nombre, promedio: promedios.get(m.id) ?? null })),
       materiasReprobadas:  reprobadas,
       materiasSinPromedio: sinPromedio,
       detalle,
@@ -205,9 +252,21 @@ export interface ResultadoLote {
 // pedida. Lo que mande el navegador es solo la lista de ids: jamás el
 // resultado. Las inscripciones incompletas se rechazan una por una y no
 // frenan al resto. Las escrituras van en una sola transacción.
-export async function registrarResultadosLote(gestionId: number, inscripcionIds: number[]): Promise<ResultadoLote> {
+export async function registrarResultadosLote(
+  gestionId: number,
+  inscripcionIds: number[],
+  cursoId?: number,
+): Promise<ResultadoLote> {
   const ids = [...new Set(inscripcionIds)]
-  const { resultados } = await calcularResultadosGestion(gestionId, { inscripcionIds: ids })
+  const { resultados } = await calcularResultadosGestion(gestionId, { inscripcionIds: ids, cursoId })
+
+  // Deja la tabla PromedioFinal igual a lo que se calculó (boletines y reportes
+  // la leen). Solo escribe lo que cambió, así que normalmente no toca nada.
+  const asignaciones = await prisma.docenteMateriaCurso.findMany({
+    where:  { gestionId, ...(cursoId !== undefined ? { cursoId } : {}) },
+    select: { id: true },
+  })
+  for (const a of asignaciones) await calcularPromediosFinales(a.id, gestionId)
 
   const porId = new Map(resultados.map(r => [r.inscripcionId, r]))
   const errores: ResultadoLote['errores'] = []

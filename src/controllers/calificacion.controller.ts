@@ -3,6 +3,7 @@ import { prisma } from '../lib/prisma.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
+import { calcularPromediosFinales } from '../lib/promedio-final.helper.js'
 import { esDocenteDeAsignacion, miEstudianteId, puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 // ─── GET /api/calificaciones ──────────────────────────────────────────────────
@@ -93,6 +94,11 @@ export const getCalificaciones = asyncHandler(async (req: Request, res: Response
 // /api/actividades-evaluativas/:id/notas), que dispara el recálculo
 // automático — por eso este endpoint RECHAZA la edición si el trimestre
 // sigue abierto (evita dos caminos distintos escribiendo el mismo campo).
+//
+// IMPORTANTE: la corrección también actualiza el PromedioFinal de la materia
+// (en la MISMA transacción). Antes solo cambiaba el promedio trimestral y el
+// promedio final —que se escribe al cerrar el trimestre— quedaba con el valor
+// viejo: boletines y resultado del año seguían mostrando la nota sin corregir.
 export const updateCalificacion = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { promedioTrimestral, motivo } = req.body as {
@@ -102,6 +108,12 @@ export const updateCalificacion = async (req: Request, res: Response): Promise<v
 
   if (promedioTrimestral === undefined) {
     res.status(400).json({ error: 'promedioTrimestral es obligatorio' })
+    return
+  }
+  // Esta nota decide aprobar o reprobar: debe ser un número real en la escala 0-100.
+  if (typeof promedioTrimestral !== 'number' || !Number.isFinite(promedioTrimestral)
+      || promedioTrimestral < 0 || promedioTrimestral > 100) {
+    res.status(400).json({ error: 'promedioTrimestral debe ser un número entre 0 y 100' })
     return
   }
   if (!motivo) {
@@ -127,8 +139,8 @@ export const updateCalificacion = async (req: Request, res: Response): Promise<v
       return
     }
 
-    const [historial, calificacionActualizada] = await prisma.$transaction([
-      prisma.historialCalificacion.create({
+    const { historial, calificacionActualizada } = await prisma.$transaction(async tx => {
+      const historial = await tx.historialCalificacion.create({
         data: {
           promedioAnterior: calificacion.promedioTrimestral,
           promedioNuevo:    promedioTrimestral,
@@ -136,9 +148,14 @@ export const updateCalificacion = async (req: Request, res: Response): Promise<v
           usuarioId:        req.user!.id,
           calificacionId:   id,
         },
-      }),
-      prisma.calificacion.update({ where: { id }, data: { promedioTrimestral } }),
-    ])
+      })
+      const calificacionActualizada = await tx.calificacion.update({ where: { id }, data: { promedioTrimestral } })
+
+      // Mantiene PromedioFinal al día (si ya existen los 3 trimestres).
+      await calcularPromediosFinales(calificacion.docenteMateriaCursoId, calificacion.trimestre.gestionId, tx)
+
+      return { historial, calificacionActualizada }
+    })
 
     res.status(200).json({ calificacion: calificacionActualizada, historial })
   } catch (error) {
@@ -361,45 +378,5 @@ export const getHistorialCalificacion = async (req: Request, res: Response): Pro
   } catch (error) {
     console.error('[calificacion.getHistorialCalificacion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
-  }
-}
-
-// ══════════════════════════════════════
-// FUNCIÓN AUXILIAR
-// ══════════════════════════════════════
-
-// ÚNICO escritor de PromedioFinal. Se llama al cerrar cada trimestre;
-// solo materializa el promedio cuando YA hay promedioTrimestral de TODOS
-// los trimestres de la gestión (antes era un "3" fijo — ahora se cuenta
-// dinámicamente, porque el número de trimestres es configurable).
-async function calcularPromediosFinales(docenteMateriaCursoId: number, gestionId: number) {
-  const totalTrimestres = await prisma.trimestre.count({ where: { gestionId } })
-
-  const gestion = await prisma.gestion.findUniqueOrThrow({
-    where: { id: gestionId }, select: { notaMinimaAprobacion: true },
-  })
-  const notaMinima = Number(gestion.notaMinimaAprobacion)
-
-  const calificaciones = await prisma.calificacion.findMany({
-    where: { docenteMateriaCursoId, promedioTrimestral: { not: null } },
-  })
-
-  const porInscripcion: Record<number, number[]> = {}
-  for (const cal of calificaciones) {
-    (porInscripcion[cal.inscripcionId] ??= []).push(Number(cal.promedioTrimestral))
-  }
-
-  for (const [inscripcionIdStr, promedios] of Object.entries(porInscripcion)) {
-    if (promedios.length < totalTrimestres) continue // faltan trimestres
-
-    const inscripcionId  = Number(inscripcionIdStr)
-    const promedioFinal  = promedios.reduce((a, b) => a + b, 0) / promedios.length
-    const resultado: 'PROMOVIDO' | 'REPROBADO' = promedioFinal >= notaMinima ? 'PROMOVIDO' : 'REPROBADO'
-
-    await prisma.promedioFinal.upsert({
-      where: { inscripcionId_docenteMateriaCursoId: { inscripcionId, docenteMateriaCursoId } },
-      update: { promedioFinal, resultado },
-      create: { inscripcionId, docenteMateriaCursoId, promedioFinal, resultado },
-    })
   }
 }

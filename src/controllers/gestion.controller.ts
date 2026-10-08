@@ -6,6 +6,18 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { ErrorDeUsuario } from '../lib/errores.js'
 import { z } from 'zod'
 import { calcularResultadosGestion, registrarResultadosLote } from '../services/resultado-final.service.js'
+import { copiarEstructura } from '../services/copiar-estructura.service.js'
+import { resumenCursosPromocion, propuestaMatriculaCurso, matricularCurso } from '../services/promocion.service.js'
+
+// Qué copiar de otra gestión (todo opcional; si no se indica, se copia).
+const copiaSchema = z.object({
+  origenId:      z.number().int().positive(),
+  cursos:        z.boolean().optional(),
+  asignaciones:  z.boolean().optional(),
+  trimestres:    z.boolean().optional(),
+  dimensiones:   z.boolean().optional(),
+  conceptosPago: z.boolean().optional(),
+})
 
 // ─── GET /api/gestiones ───────────────────────────────────────────────────────
 export const getGestiones = async (_req: Request, res: Response): Promise<void> => {
@@ -41,8 +53,10 @@ export const getGestionActiva = async (_req: Request, res: Response): Promise<vo
         _count:     { select: { inscripciones: true } },
       },
     })
+    // "Sin gestión activa" es un estado normal (p. ej. recién cerrada la anterior),
+    // no un error: se responde 200 con null para no llenar la consola de 404.
     if (!gestion) {
-      res.status(404).json({ error: 'No hay gestión activa' })
+      res.status(200).json(null)
       return
     }
     res.status(200).json({ ...gestion, director: gestion.director ? aplanarPersona(gestion.director) : null })
@@ -79,18 +93,30 @@ export const getGestionById = async (req: Request, res: Response): Promise<void>
 
 // ─── POST /api/gestiones ──────────────────────────────────────────────────────
 export const createGestion = async (req: Request, res: Response): Promise<void> => {
-  const { anio, descripcion, fechaInicio, fechaFin, directorId, notaMinimaAprobacion } = req.body as {
+  const { anio, descripcion, fechaInicio, fechaFin, directorId, notaMinimaAprobacion, copiarDe } = req.body as {
     anio?: number
     descripcion?: string
     fechaInicio?: string
     fechaFin?: string
     directorId?: number
     notaMinimaAprobacion?: number
+    copiarDe?: unknown
   }
 
   if (!anio) {
     res.status(400).json({ error: 'El año es obligatorio' })
     return
+  }
+
+  // Opcional: copiar la estructura (cursos, asignaciones, trimestres...) de otra gestión.
+  let copia: z.infer<typeof copiaSchema> | undefined
+  if (copiarDe !== undefined && copiarDe !== null) {
+    const parsed = copiaSchema.safeParse(copiarDe)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'copiarDe inválido: se espera { origenId, cursos?, asignaciones?, trimestres?, dimensiones?, conceptosPago? }' })
+      return
+    }
+    copia = parsed.data
   }
 
   try {
@@ -112,21 +138,37 @@ export const createGestion = async (req: Request, res: Response): Promise<void> 
       }
     }
 
-    const gestion = await prisma.gestion.create({
-      data: {
-        anio,
-        descripcion: descripcion ?? `Gestión Escolar ${anio}`,
-        fechaInicio: fechaInicio ? new Date(fechaInicio) : undefined,
-        fechaFin:    fechaFin    ? new Date(fechaFin)    : undefined,
-        notaMinimaAprobacion,
-        directorId,
-      },
-      include: {
-        director: { select: { persona: { select: { nombre: true, apellido: true } } } },
-      },
+    // Todo en una transacción: si la copia falla no queda una gestión vacía a medias.
+    const { gestion, resultadoCopia } = await prisma.$transaction(async tx => {
+      const gestion = await tx.gestion.create({
+        data: {
+          anio,
+          descripcion: descripcion ?? `Gestión Escolar ${anio}`,
+          fechaInicio: fechaInicio ? new Date(fechaInicio) : undefined,
+          fechaFin:    fechaFin    ? new Date(fechaFin)    : undefined,
+          notaMinimaAprobacion,
+          directorId,
+        },
+        include: {
+          director: { select: { persona: { select: { nombre: true, apellido: true } } } },
+        },
+      })
+      const resultadoCopia = copia
+        ? await copiarEstructura(copia.origenId, gestion.id, copia, tx)
+        : null
+      return { gestion, resultadoCopia }
+    }, { timeout: 30000 })
+
+    res.status(201).json({
+      ...gestion,
+      director: gestion.director ? aplanarPersona(gestion.director) : null,
+      copia:    resultadoCopia,
     })
-    res.status(201).json({ ...gestion, director: gestion.director ? aplanarPersona(gestion.director) : null })
   } catch (error) {
+    if (error instanceof ErrorDeUsuario) {
+      res.status(error.status).json({ error: error.message })
+      return
+    }
     console.error('[gestion.createGestion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
@@ -295,7 +337,7 @@ export const cerrarGestion = async (req: Request, res: Response): Promise<void> 
     res.status(200).json({
       message: `Gestión ${cerrada.anio} cerrada correctamente`,
       gestion: cerrada,
-      siguientePaso: 'Crea la siguiente gestión y usa GET /gestiones/:id/propuesta-inscripciones para preparar las inscripciones del nuevo año',
+      siguientePaso: 'Crea la siguiente gestión copiando la estructura de esta (POST /gestiones con copiarDe) y usa Promoción para inscribir a los estudiantes en el nuevo año',
     })
   } catch (error) {
     console.error('[gestion.cerrarGestion]', error)
@@ -393,7 +435,9 @@ export const getPropuestaResultados = asyncHandler(async (req, res): Promise<voi
   const id = Number(req.params.id)
   if (!Number.isInteger(id) || id <= 0) throw new ErrorDeUsuario('id de gestión inválido')
 
-  const calculo = await calcularResultadosGestion(id)
+  // ?cursoId=N limita el cálculo a un curso (Promoción por curso).
+  const cursoId = enteroOpcional(req.query.cursoId, 'cursoId')
+  const calculo = await calcularResultadosGestion(id, { cursoId })
   res.status(200).json(calculo)
 })
 
@@ -403,13 +447,79 @@ export const getPropuestaResultados = asyncHandler(async (req, res): Promise<voi
 // puede promover a quien reprobó ni reprobar a quien aprobó.
 const resultadosLoteSchema = z.object({
   inscripcionIds: z.array(z.number().int().positive()).min(1, 'Selecciona al menos un estudiante').max(2000),
+  // Promoción por curso: si se indica, solo se aceptan estudiantes de ese curso.
+  cursoId:        z.number().int().positive().optional(),
 })
 
 export const registrarResultados = asyncHandler(async (req, res): Promise<void> => {
   const id = Number(req.params.id)
   if (!Number.isInteger(id) || id <= 0) throw new ErrorDeUsuario('id de gestión inválido')
 
-  const { inscripcionIds } = resultadosLoteSchema.parse(req.body)
-  const resultado = await registrarResultadosLote(id, inscripcionIds)
+  const { inscripcionIds, cursoId } = resultadosLoteSchema.parse(req.body)
+  const resultado = await registrarResultadosLote(id, inscripcionIds, cursoId)
+  res.status(200).json(resultado)
+})
+
+// ─── POST /api/gestiones/:id/copiar-estructura ───────────────────────────────
+// Copia cursos, asignaciones, trimestres, dimensiones y conceptos de pago de
+// otra gestión (origenId) a ESTA (:id). Aditivo: no pisa ni borra lo existente.
+export const copiarEstructuraGestion = asyncHandler(async (req, res): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) throw new ErrorDeUsuario('id de gestión inválido')
+
+  const { origenId, ...opciones } = copiaSchema.parse(req.body)
+  const resultado = await prisma.$transaction(tx => copiarEstructura(origenId, id, opciones, tx), { timeout: 30000 })
+  res.status(200).json(resultado)
+})
+
+// ─── Promoción por curso ─────────────────────────────────────────────────────
+// Lee un entero opcional de la query (?cursoId=3). Si viene y no es válido → 400.
+function enteroOpcional(valor: unknown, nombre: string): number | undefined {
+  if (valor === undefined || valor === '') return undefined
+  const n = Number(valor)
+  if (!Number.isInteger(n) || n <= 0) throw new ErrorDeUsuario(`${nombre} inválido`)
+  return n
+}
+
+function enteroRequerido(valor: unknown, nombre: string): number {
+  const n = enteroOpcional(valor, nombre)
+  if (n === undefined) throw new ErrorDeUsuario(`${nombre} es obligatorio`)
+  return n
+}
+
+// GET /api/gestiones/:id/promocion/cursos?destinoId=N
+// Tablero: un renglón por curso de la gestión :id con cuántos estudiantes tiene,
+// cuántos ya tienen resultado y cuántos ya fueron matriculados en la gestión destino.
+export const getCursosPromocion = asyncHandler(async (req, res): Promise<void> => {
+  const id = enteroRequerido(req.params.id, 'id de gestión')
+  const destinoId = enteroOpcional(req.query.destinoId, 'destinoId')
+  res.status(200).json(await resumenCursosPromocion(id, destinoId))
+})
+
+// GET /api/gestiones/:id/promocion/matricula?cursoId=N&destinoId=M
+// Paso 2 de UN curso: sus estudiantes por grupo (promovidos, repiten, egresan...) y
+// los cursos de la gestión destino a los que pueden ir, con uno sugerido.
+export const getPropuestaMatricula = asyncHandler(async (req, res): Promise<void> => {
+  const id = enteroRequerido(req.params.id, 'id de gestión')
+  const cursoId = enteroRequerido(req.query.cursoId, 'cursoId')
+  const destinoId = enteroRequerido(req.query.destinoId, 'destinoId')
+  res.status(200).json(await propuestaMatriculaCurso(id, cursoId, destinoId))
+})
+
+// POST /api/gestiones/:id/promocion/matricular
+// Matricula en lote a estudiantes de UN curso. El servidor valida todo (grado
+// correcto, sin doble matrícula, historial) y reporta uno por uno los que fallan.
+const matricularSchema = z.object({
+  destinoId:         z.number().int().positive(),
+  cursoOrigenId:     z.number().int().positive(),
+  cursoPromovidosId: z.number().int().positive().optional(),
+  cursoRepitenId:    z.number().int().positive().optional(),
+  inscripcionIds:    z.array(z.number().int().positive()).min(1, 'Selecciona al menos un estudiante').max(500),
+})
+
+export const matricularPromocion = asyncHandler(async (req, res): Promise<void> => {
+  const id = enteroRequerido(req.params.id, 'id de gestión')
+  const pedido = matricularSchema.parse(req.body)
+  const resultado = await prisma.$transaction(tx => matricularCurso(id, pedido, tx), { timeout: 30000 })
   res.status(200).json(resultado)
 })

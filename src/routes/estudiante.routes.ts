@@ -5,6 +5,7 @@ import {
   createEstudiante,
   updateEstudiante,
   inscribirEstudiante,
+  getHistorialEstudiante,
   getInscripcion,
   registrarResultado,
   importEstudiantes,
@@ -40,6 +41,12 @@ router.get(
   '/',
   requireRol('DIRECTOR', 'SECRETARIA'),
   getEstudiantes
+)
+// Específica antes de /:id
+router.get(
+  '/:id/historial',
+  requireRol('DIRECTOR', 'SECRETARIA'),
+  getHistorialEstudiante
 )
 router.get(
   '/:id',

@@ -274,21 +274,61 @@ export const asignarMateriaCurso = async (req: Request, res: Response): Promise<
 
 // ─── DELETE /api/docentes/:id/asignacion/:asignacionId ───────────────────────
 export const removeAsignacion = async (req: Request, res: Response): Promise<void> => {
+  const docenteId    = Number(req.params.id)
   const asignacionId = Number(req.params.asignacionId)
 
+  if (!Number.isInteger(docenteId) || docenteId <= 0 || !Number.isInteger(asignacionId) || asignacionId <= 0) {
+    res.status(400).json({ error: 'id inválido' })
+    return
+  }
+
   try {
-    const existe = await prisma.docenteMateriaCurso.findUnique({
-      where: { id: asignacionId },
+    // Debe ser una asignación DE ESE docente (antes se ignoraba el :id de la URL).
+    const asignacion = await prisma.docenteMateriaCurso.findFirst({
+      where:   { id: asignacionId, docenteId },
+      include: {
+        _count: {
+          select: {
+            calificaciones: true, asistencias: true, actividadesEvaluativas: true,
+            bitacoras: true, promediosFinales: true, resumenAsistencias: true, horarios: true,
+          },
+        },
+      },
     })
-    if (!existe) {
+    if (!asignacion) {
       res.status(404).json({ error: 'Asignación no encontrada' })
       return
     }
 
+    // Con notas, asistencia, actividades o bitácoras la base de datos NO permite borrar
+    // (FK Restrict): se avisa con claridad en vez de devolver un 500 genérico.
+    const c = asignacion._count
+    const conDatos = [
+      [c.calificaciones,          'calificaciones'],
+      [c.asistencias,             'registros de asistencia'],
+      [c.resumenAsistencias,      'resúmenes de asistencia'],
+      [c.actividadesEvaluativas,  'actividades evaluativas'],
+      [c.bitacoras,               'bitácoras de clase'],
+      [c.promediosFinales,        'promedios finales'],
+    ].filter(([n]) => (n as number) > 0).map(([n, txt]) => `${n} ${txt}`)
+
+    if (conDatos.length) {
+      res.status(409).json({
+        error: `No se puede quitar la asignación porque ya tiene registros: ${conDatos.join(', ')}. Solo se puede quitar una asignación sin actividad.`,
+      })
+      return
+    }
+
+    // Los horarios de la asignación se eliminan con ella (cascada).
     await prisma.docenteMateriaCurso.delete({ where: { id: asignacionId } })
 
-    res.status(200).json({ message: 'Asignación eliminada correctamente' })
+    res.status(200).json({ message: 'Asignación eliminada correctamente', horariosEliminados: c.horarios })
   } catch (error) {
+    // Red de seguridad: otra tabla con registros aparecida entre la consulta y el borrado.
+    if ((error as { code?: string }).code === 'P2003') {
+      res.status(409).json({ error: 'No se puede quitar la asignación porque ya tiene registros asociados' })
+      return
+    }
     console.error('[docente.removeAsignacion]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
