@@ -8,7 +8,8 @@
 
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
-import { recalcularCalificacion } from '../lib/calificacion.helper.js'
+import { Prohibido } from '../lib/errores.js'
+import { obtenerActividadParaNotas, registrarNotas, desactivarActividad, type NotaEntrada } from '../services/evaluacion.service.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { esDocenteDeAsignacion } from '../lib/ownership.helper.js'
@@ -264,89 +265,40 @@ export const createActividadEvaluativa = asyncHandler(async (req: Request, res: 
 })
 
 // ─── DELETE /api/actividades-evaluativas/:id ─────────────────────────────────
-// Baja lógica (activo: false) — nunca se borra físicamente porque ya
-// puede tener NotaActividad asociadas que sustentan un promedio.
-export const desactivarActividadEvaluativa = async (req: Request, res: Response): Promise<void> => {
-  const id = Number(req.params.id)
-  try {
-    const actividad = await prisma.actividadEvaluativa.update({
-      where: { id },
-      data:  { activo: false },
-    })
-    res.status(200).json({ message: 'Actividad evaluativa desactivada', actividad })
-  } catch (error) {
-    console.error('[evaluacion.desactivarActividadEvaluativa]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
-  }
-}
-
-// ─── POST /api/actividades-evaluativas/:id/notas ─────────────────────────────
-// El docente registra las notas de toda una actividad de una sola vez.
-// Dispara recalcularCalificacion() para cada estudiante afectado.
-// Body: { notas: [{ inscripcionId, nota, observacion? }] }
-export const registrarNotasActividad = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-  const actividadEvaluativaId = Number(req.params.id)
-  if (!Number.isInteger(actividadEvaluativaId)) {
-    res.status(400).json({ error: 'ID inválido' })
-    return
-  }
-  const { notas } = req.body as {
-    notas?: Array<{ inscripcionId: number; nota: number; observacion?: string }>
-  }
-
-  if (!notas?.length) {
-    res.status(400).json({ error: 'notas es obligatorio' })
-    return
-  }
-
-  const actividad = await prisma.actividadEvaluativa.findUnique({
-    where: { id: actividadEvaluativaId },
-    include: { trimestre: true, docenteMateriaCurso: true },
-  })
-  if (!actividad) {
-    res.status(404).json({ error: 'Actividad evaluativa no encontrada' })
-    return
-  }
-  if (actividad.trimestre.cerrado) {
-    res.status(403).json({ error: 'El trimestre está cerrado — no se pueden modificar notas' })
-    return
-  }
+// Baja lógica (activo: false) — nunca se borra físicamente porque ya puede tener
+// NotaActividad asociadas que sustentan un promedio.
+// ✅ Antes: no comprobaba que la actividad fuera del docente (cualquier DOCENTE podía
+// desactivar la de otro), funcionaba aunque el trimestre ya estuviera cerrado, y no
+// recalculaba los promedios: quedaban contando una actividad ya dada de baja.
+export const desactivarActividadEvaluativa = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const actividad = await obtenerActividadParaNotas(Number(req.params.id))
 
   if (!await esDocenteDeAsignacion(req, actividad.docenteMateriaCursoId)) {
-    res.status(403).json({ error: 'Sin acceso a esta materia/curso' })
-    return
+    throw new Prohibido('Sin acceso a esta materia/curso')
   }
 
-  const notaInvalida = notas.find(n => n.nota < 0 || n.nota > Number(actividad.puntajeMaximo))
-  if (notaInvalida) {
-    res.status(400).json({
-      error: `Nota inválida: ${notaInvalida.nota}. El máximo de esta actividad es ${actividad.puntajeMaximo}`,
-    })
-    return
+  res.status(200).json({
+    message: 'Actividad evaluativa desactivada',
+    actividad: await desactivarActividad(actividad),
+  })
+})
+
+// ─── POST /api/actividades-evaluativas/:id/notas ─────────────────────────────
+// El docente registra las notas de toda una actividad de una sola vez y se
+// recalculan los promedios. Body (ya validado por registrarNotasActividadSchema
+// en la ruta): { notas: [{ inscripcionId, nota, observacion? }] }
+//
+// El controller es DELGADO a propósito: HTTP aquí, reglas en evaluacion.service.ts.
+export const registrarNotasActividad = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { notas } = req.body as { notas: NotaEntrada[] }
+
+  const actividad = await obtenerActividadParaNotas(Number(req.params.id))
+
+  if (!await esDocenteDeAsignacion(req, actividad.docenteMateriaCursoId)) {
+    throw new Prohibido('Sin acceso a esta materia/curso')
   }
 
-  await prisma.$transaction(
-    notas.map(n =>
-      prisma.notaActividad.upsert({
-        where: { actividadEvaluativaId_inscripcionId: { actividadEvaluativaId, inscripcionId: n.inscripcionId } },
-        update: { nota: n.nota, observacion: n.observacion, registradoPorId: req.user?.id },
-        create: {
-          actividadEvaluativaId, inscripcionId: n.inscripcionId,
-          nota: n.nota, observacion: n.observacion, registradoPorId: req.user?.id,
-        },
-      })
-    )
-  )
-
-  const resultados = []
-  for (const n of notas) {
-    const calificacion = await recalcularCalificacion(
-      n.inscripcionId, actividad.docenteMateriaCursoId, actividad.trimestreId
-    )
-    resultados.push({ inscripcionId: n.inscripcionId, promedioTrimestral: calificacion.promedioTrimestral })
-  }
-
-  res.status(200).json({ registradas: notas.length, resultados })
+  res.status(200).json(await registrarNotas(actividad, notas, req.user!.id))
 })
 
 // ─── GET /api/actividades-evaluativas/:id/notas ──────────────────────────────

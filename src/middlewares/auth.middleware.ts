@@ -20,6 +20,11 @@ interface JwtPayload {
 //   • contraseña cambiada/reseteada   → 401 (el token viejo deja de servir)
 //   • roles modificados               → se usan los roles ACTUALES de la BD,
 //                                       no los que el token traía
+//
+// Se monta UNA sola vez en app.ts (app.use('/api', authMiddleware)) después de las
+// rutas públicas. Antes cada router lo montaba por su cuenta y, como dos routers
+// están montados en '/api', esta consulta a la BD se ejecutaba 2 o 3 veces por
+// request en /pagos, /boletin, /actividades, /institucion y /horarios.
 export const authMiddleware = async (
   req: Request,
   res: Response,
@@ -32,7 +37,7 @@ export const authMiddleware = async (
     return
   }
 
-  const token = authHeader.split(' ')[1]
+  const token = authHeader.slice('Bearer '.length).trim()
 
   let payload: JwtPayload
   try {
@@ -47,34 +52,31 @@ export const authMiddleware = async (
     return
   }
 
-  try {
-    const usuario = await prisma.usuario.findUnique({
-      where:  { id: payload.id },
-      select: { username: true, roles: true, activo: true, passwordHash: true },
-    })
+  // Si la BD falla NO es un 401 (el token es válido): es un error del servidor.
+  // Express 5 envía el rechazo de esta función async al errorMiddleware, que lo
+  // registra con el id de la request y responde 500 — no hace falta try/catch.
+  const usuario = await prisma.usuario.findUnique({
+    where:  { id: payload.id },
+    select: { username: true, roles: true, activo: true, passwordHash: true },
+  })
 
-    if (!usuario || !usuario.activo) {
-      res.status(401).json({ error: 'Sesión inválida o cuenta desactivada' })
-      return
-    }
-
-    // Los tokens emitidos antes de esta versión no traen "pv": se rechazan
-    // y el usuario vuelve a iniciar sesión una sola vez.
-    if (payload.pv !== huellaPassword(usuario.passwordHash)) {
-      res.status(401).json({ error: 'Sesión expirada. Inicia sesión nuevamente' })
-      return
-    }
-
-    req.user = {
-      id:       payload.id,
-      roles:    usuario.roles,
-      username: usuario.username,
-      nombre:   payload.nombre,
-    }
-    next()
-  } catch (error) {
-    // Si la BD falla NO es un 401 (el token es válido): es un error del servidor.
-    console.error('[authMiddleware]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  if (!usuario || !usuario.activo) {
+    res.status(401).json({ error: 'Sesión inválida o cuenta desactivada' })
+    return
   }
+
+  // Los tokens emitidos antes de esta versión no traen "pv": se rechazan
+  // y el usuario vuelve a iniciar sesión una sola vez.
+  if (payload.pv !== huellaPassword(usuario.passwordHash)) {
+    res.status(401).json({ error: 'Sesión expirada. Inicia sesión nuevamente' })
+    return
+  }
+
+  req.user = {
+    id:       payload.id,
+    roles:    usuario.roles,
+    username: usuario.username,
+    nombre:   payload.nombre,
+  }
+  next()
 }

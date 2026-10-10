@@ -8,11 +8,16 @@ import {
   obtenerDetalleEstudiante,
   obtenerDetallePorEstudiante,
 } from '../controllers/boletin.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
-
+import { paramEntero } from '../middlewares/validate.middleware.js'
 const router = Router()
-router.use(authMiddleware)
+
+// Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
+router.param('cursoId', paramEntero)
+router.param('estudianteId', paramEntero)
+router.param('gestionId', paramEntero)
+router.param('inscripcionId', paramEntero)
+router.param('trimestreId', paramEntero)
 
 // ⚠️ RUTAS ESPECÍFICAS SIEMPRE ANTES que '/:estudianteId/:trimestreId' —
 // '/general', '/mejores' y '/detalle' tienen la MISMA forma (boletin + 2

@@ -1,50 +1,117 @@
-// src/lib/curso.helper.ts
+// src/lib/calificacion.helper.ts
 //
-// v6 quitó el campo Curso.nombre — ahora un curso se identifica por
-// nivel + grado + paralelo + turno. Estas funciones arman un nombre
-// legible para respuestas de API (compat con el frontend, que ya
-// mostraba "curso.nombre" en varias pantallas) y resuelven la
-// progresión de un curso al siguiente año (para promociones).
+// ÚNICO escritor de CalificacionDimension.promedio y Calificacion.promedioTrimestral
+// (tal como pide el comentario del schema). Se llama después de cualquier cambio
+// en NotaActividad. La matemática vive en calificacion.calculo.ts (pura y testeada);
+// este archivo solo lee los datos, llama al cálculo y guarda el resultado.
+//
+// ── Qué cambió y por qué ────────────────────────────────────────────────────
+// Antes, por CADA estudiante se ejecutaban ~3 + 2×(dimensiones) consultas, una tras
+// otra y sin transacción. Al registrar las notas de un curso de 40 estudiantes con
+// 4 dimensiones eran ~480 consultas secuenciales y, si una fallaba a la mitad, quedaban
+// promedios de unos estudiantes actualizados y de otros no.
+//
+// Ahora, para TODO el lote: 4 lecturas fijas (sin importar cuántos estudiantes) y las
+// escrituras en UNA transacción: o se guardan todos los promedios o ninguno.
 
-import type { Nivel, Turno } from '../../prisma/generated/prisma/enums.js'
+import { prisma } from './prisma.js'
+import type { Prisma } from '../../prisma/generated/prisma/client.js'
+import { calcularPromedioTrimestral, type ActividadCalculo } from './calificacion.calculo.js'
 
-export const NIVEL_TEXTO: Record<Nivel, string> = {
-  PRIMARIA:   'Primaria',
-  SECUNDARIA: 'Secundaria',
+export interface PromedioCalculado {
+  inscripcionId:      number
+  promedioTrimestral: number | null
 }
 
-export const TURNO_TEXTO: Record<Turno, string> = {
-  MANANA: 'Mañana',
-  TARDE:  'Tarde',
-  NOCHE:  'Noche',
-}
+export async function recalcularCalificaciones(
+  inscripcionIds: number[],
+  docenteMateriaCursoId: number,
+  trimestreId: number,
+): Promise<PromedioCalculado[]> {
+  const ids = [...new Set(inscripcionIds)]
+  if (ids.length === 0) return []
 
-export function nombreCurso(curso: { nivel: Nivel; grado: number; paralelo: string; turno: Turno }): string {
-  return `${curso.grado}° ${NIVEL_TEXTO[curso.nivel]} "${curso.paralelo}" (${TURNO_TEXTO[curso.turno]})`
-}
+  // 1-2) Configuración: dimensiones de la gestión
+  const dmc = await prisma.docenteMateriaCurso.findUniqueOrThrow({
+    where:  { id: docenteMateriaCursoId },
+    select: { gestionId: true },
+  })
+  const dimensiones = await prisma.dimensionEvaluacion.findMany({
+    where:   { gestionId: dmc.gestionId },
+    orderBy: { orden: 'asc' },
+    select:  { id: true, puntajeMaximo: true, pesoEnPromedio: true },
+  })
+  const dimensionesCalculo = dimensiones.map(d => ({
+    id: d.id, puntajeMaximo: Number(d.puntajeMaximo), pesoEnPromedio: Number(d.pesoEnPromedio),
+  }))
 
-// Agrega `nombre` calculado sin pisar los campos originales.
-export function conNombre<T extends { nivel: Nivel; grado: number; paralelo: string; turno: Turno }>(
-  curso: T
-): T & { nombre: string } {
-  return { ...curso, nombre: nombreCurso(curso) }
-}
+  // 3) Actividades activas con las notas de ESTOS estudiantes (una sola consulta)
+  const actividadesBD = await prisma.actividadEvaluativa.findMany({
+    where:  { docenteMateriaCursoId, trimestreId, activo: true },
+    select: {
+      dimensionId: true, puntajeMaximo: true, peso: true,
+      notas: { where: { inscripcionId: { in: ids } }, select: { inscripcionId: true, nota: true } },
+    },
+  })
 
-// Primaria 1..6 → Secundaria 1..6. Devuelve null si ya es el último
-// grado de Secundaria (egresado, no hay "siguiente curso").
-export function siguienteNivelGrado(nivel: Nivel, grado: number): { nivel: Nivel; grado: number } | null {
-  if (nivel === 'PRIMARIA') {
-    return grado < 6 ? { nivel: 'PRIMARIA', grado: grado + 1 } : { nivel: 'SECUNDARIA', grado: 1 }
+  // Índice nota por (actividad, estudiante) para no buscar en listas dentro del bucle
+  const actividades = actividadesBD.map(a => ({
+    dimensionId:   a.dimensionId,
+    puntajeMaximo: Number(a.puntajeMaximo),
+    peso:          Number(a.peso),
+    notaPorInscripcion: new Map(a.notas.map(n => [n.inscripcionId, Number(n.nota)] as const)),
+  }))
+
+  // 4) Asegurar que exista la fila Calificacion de cada estudiante y traer sus ids
+  await prisma.calificacion.createMany({
+    data: ids.map(inscripcionId => ({ inscripcionId, docenteMateriaCursoId, trimestreId })),
+    skipDuplicates: true,
+  })
+  const calificaciones = await prisma.calificacion.findMany({
+    where:  { inscripcionId: { in: ids }, docenteMateriaCursoId, trimestreId },
+    select: { id: true, inscripcionId: true },
+  })
+  const calificacionIdPorInscripcion = new Map(calificaciones.map(c => [c.inscripcionId, c.id]))
+
+  // Cálculo en memoria + escrituras preparadas
+  const resultados: PromedioCalculado[] = []
+  const escrituras: Prisma.PrismaPromise<unknown>[] = []
+
+  for (const inscripcionId of ids) {
+    const calificacionId = calificacionIdPorInscripcion.get(inscripcionId)
+    if (calificacionId === undefined) continue   // no debería pasar: se acaba de crear
+
+    const delEstudiante: ActividadCalculo[] = actividades.map(a => ({
+      dimensionId:   a.dimensionId,
+      puntajeMaximo: a.puntajeMaximo,
+      peso:          a.peso,
+      nota:          a.notaPorInscripcion.get(inscripcionId) ?? null,
+    }))
+
+    const { promediosDimension, promedioTrimestral } = calcularPromedioTrimestral(dimensionesCalculo, delEstudiante)
+
+    for (const [dimensionId, promedio] of promediosDimension) {
+      escrituras.push(prisma.calificacionDimension.upsert({
+        where:  { calificacionId_dimensionId: { calificacionId, dimensionId } },
+        update: { promedio },
+        create: { calificacionId, dimensionId, promedio },
+      }))
+    }
+    escrituras.push(prisma.calificacion.update({ where: { id: calificacionId }, data: { promedioTrimestral } }))
+    resultados.push({ inscripcionId, promedioTrimestral })
   }
-  // SECUNDARIA
-  return grado < 6 ? { nivel: 'SECUNDARIA', grado: grado + 1 } : null
+
+  // 5) Todo o nada
+  await prisma.$transaction(escrituras)
+  return resultados
 }
 
-// 1° "A" Secundaria → "1AS"   ·   2° "B" Primaria → "2BP"
-// Mismo criterio que codigoCurso() del frontend (src/lib/abreviar.ts) —
-// si cambiás el formato en uno, cambialo en el otro para que el Excel
-// exportado por acá siga siendo válido para importar desde ahí.
-export function codigoCurso(curso: { grado: number; paralelo: string; nivel: Nivel }): string {
-  const inicialNivel = curso.nivel === 'PRIMARIA' ? 'P' : 'S'
-  return `${curso.grado}${curso.paralelo.toUpperCase()}${inicialNivel}`
+// Versión de un solo estudiante (compatibilidad con el código existente).
+export async function recalcularCalificacion(
+  inscripcionId: number,
+  docenteMateriaCursoId: number,
+  trimestreId: number,
+): Promise<PromedioCalculado> {
+  const [resultado] = await recalcularCalificaciones([inscripcionId], docenteMateriaCursoId, trimestreId)
+  return resultado ?? { inscripcionId, promedioTrimestral: null }
 }

@@ -19,11 +19,14 @@ import {
   desactivarActividadEvaluativa,
   registrarNotasActividad,
 } from '../controllers/evaluacion.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
+import { validar, paramEntero } from '../middlewares/validate.middleware.js'
+import { registrarNotasActividadSchema } from '../schemas/evaluacion.schema.js'
 
 const router = Router()
-router.use(authMiddleware)
+
+// Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
+router.param('id', paramEntero)
 
 // Dimensiones de evaluación (Ser/Saber/Hacer/Decidir) — las define
 // Dirección por gestión
@@ -38,7 +41,12 @@ router.post('/actividades-evaluativas',    requireRol('DOCENTE', 'DIRECTOR'), cr
 router.delete('/actividades-evaluativas/:id', requireRol('DOCENTE', 'DIRECTOR'), desactivarActividadEvaluativa)
 
 // Notas de una actividad — dispara el recálculo del promedio
-router.post('/actividades-evaluativas/:id/notas', requireRol('DOCENTE', 'DIRECTOR'), registrarNotasActividad)
+router.post(
+  '/actividades-evaluativas/:id/notas',
+  requireRol('DOCENTE', 'DIRECTOR'),
+  validar({ body: registrarNotasActividadSchema }),
+  registrarNotasActividad
+)
 router.get('/actividades-evaluativas/:id/notas', requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE'), getNotasActividad)
 
 export default router

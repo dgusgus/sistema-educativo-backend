@@ -1,5 +1,6 @@
 import { PrismaClient, Prisma } from '../../prisma/generated/prisma/client.js'
 import { PrismaPg } from '@prisma/adapter-pg'
+import { config } from './config.js'
 
 // ⚠️ FIX GLOBAL: decimal.js (la librería que usa Prisma por debajo para el
 // tipo Decimal) define su propio toJSON() devolviendo un STRING
@@ -21,8 +22,9 @@ import { PrismaPg } from '@prisma/adapter-pg'
   return this.toNumber()
 }
 
+// DATABASE_URL ya fue validada en config.ts: si faltara, el servidor no habría arrancado.
 const adapter = new PrismaPg({
-  connectionString: process.env.DATABASE_URL ?? '',
+  connectionString: config.databaseUrl,
 })
 
 const globalForPrisma = globalThis as unknown as {
@@ -32,6 +34,6 @@ const globalForPrisma = globalThis as unknown as {
 export const prisma =
   globalForPrisma.prisma ?? new PrismaClient({ adapter })
 
-if (process.env.NODE_ENV !== 'production') {
+if (!config.esProduccion) {
   globalForPrisma.prisma = prisma
 }

@@ -1,11 +1,12 @@
 // src/routes/horario.routes.ts
 import { Router } from 'express'
 import { getHorarios, createHorario, updateHorario, deleteHorario } from '../controllers/horario.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
-
+import { paramEntero } from '../middlewares/validate.middleware.js'
 const router = Router()
-router.use(authMiddleware)
+
+// Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
+router.param('id', paramEntero)
 
 // Consulta: todos los roles — el RBAC fino (qué curso/docente puede ver
 // cada uno) vive dentro del controller, igual que en asistencia/calificacion.

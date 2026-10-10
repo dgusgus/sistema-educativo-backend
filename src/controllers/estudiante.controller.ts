@@ -12,80 +12,15 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { calcularResultadoInscripcion } from '../services/resultado-final.service.js'
 import { validarProgresionInscripcion, obtenerHistorialEstudiante } from '../services/progresion.service.js'
 import { puedeVerEstudiante } from '../lib/ownership.helper.js'
+import { listarEstudiantes } from '../services/estudiante.service.js'
+import type { ListarEstudiantesQuery } from '../schemas/persona.schema.js'
 
 // ─── GET /api/estudiantes ─────────────────────────────────────────────────────
-export const getEstudiantes = async (req: Request, res: Response): Promise<void> => {
-  const { search, cursoId, gestionId, estadoInscripcion } = req.query as {
-    search?:    string
-    cursoId?:   string
-    gestionId?: string
-    estadoInscripcion?: string
-  }
-
-  try {
-    const estudiantes = await prisma.estudiante.findMany({
-      where: {
-        activo: true,
-        persona: search
-          ? {
-              OR: [
-                { nombre:   { contains: search, mode: 'insensitive' } },
-                { apellido: { contains: search, mode: 'insensitive' } },
-                { ci:       { contains: search } },
-              ],
-            }
-          : undefined,
-        inscripciones: cursoId || gestionId || estadoInscripcion
-          ? {
-              some: {
-                ...(cursoId   && { cursoId:   Number(cursoId) }),
-                ...(gestionId && { gestionId: Number(gestionId) }),
-                // ⚠️ antes decía "estado" — el campo real es "estadoInscripcion"
-                ...(estadoInscripcion && { estadoInscripcion: estadoInscripcion as any }),
-              },
-            }
-          : undefined,
-      },
-      include: {
-        persona: true,
-        inscripciones: {
-          include: {
-            curso:   { select: { id: true, nivel: true, grado: true, paralelo: true } },
-            gestion: { select: { id: true, anio: true, activa: true } },
-          },
-          orderBy: { gestion: { anio: 'desc' } },
-          take: 1,
-        },
-        tutores: {
-          include: {
-            tutor: {
-              select: {
-                id: true,
-                persona: { select: { nombre: true, apellido: true, telefono: true } },
-              },
-            },
-          },
-        },
-        // ✅ faltaba — sin esto la lista nunca sabía si el estudiante ya
-        // tenía cuenta, así que "Vincular cuenta" salía siempre en el
-        // frontend aunque el estudiante ya tuviera una.
-        usuario: { select: { id: true, username: true, activo: true } },
-      },
-      orderBy: { persona: { apellido: 'asc' } },
-    })
-
-    res.status(200).json(estudiantes.map(e => ({
-      ...aplanarPersona(e),
-      tutores: e.tutores.map(t => ({
-        ...t,
-        tutor: { id: t.tutor.id, ...t.tutor.persona },
-      })),
-    })))
-  } catch (error) {
-    console.error('[estudiante.getEstudiantes]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
-  }
-}
+// Query ya validada por listarEstudiantesQuerySchema (ver la ruta).
+// Con ?pagina=1&limite=25 responde { data, meta }; sin ?pagina responde el arreglo completo.
+export const getEstudiantes = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  res.status(200).json(await listarEstudiantes(req.query as ListarEstudiantesQuery))
+})
 
 // ─── GET /api/estudiantes/:id ─────────────────────────────────────────────────
 export const getEstudianteById = async (req: Request, res: Response): Promise<void> => {

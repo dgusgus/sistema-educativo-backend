@@ -16,11 +16,12 @@ import {
   getPropuestaMatricula,
   matricularPromocion,
 } from '../controllers/gestion.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
-
+import { paramEntero } from '../middlewares/validate.middleware.js'
 const router = Router()
-router.use(authMiddleware)
+
+// Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
+router.param('id', paramEntero)
 
 // IMPORTANTE: rutas específicas ANTES de /:id
 router.get('/activa', requireRol('DIRECTOR', 'SECRETARIA', 'DOCENTE', 'ESTUDIANTE', 'TUTOR'), getGestionActiva)

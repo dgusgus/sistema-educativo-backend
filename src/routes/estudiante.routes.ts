@@ -12,13 +12,15 @@ import {
   exportEstudiantes,
   plantillaEstudiantes,
 } from '../controllers/estudiante.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
 import { uploadExcel } from '../middlewares/upload.middleware.js'
-
+import { paramEntero, validar } from '../middlewares/validate.middleware.js'
+import { listarEstudiantesQuerySchema } from '../schemas/persona.schema.js'
 const router = Router()
 
-router.use(authMiddleware)
+// Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
+router.param('id', paramEntero)
+
 
 // ⚠️ específicas ANTES de /:id — Express matchea en orden, si /plantilla,
 // /export o /import van después las captura getEstudianteById como
@@ -40,6 +42,7 @@ router.post(
 router.get(
   '/',
   requireRol('DIRECTOR', 'SECRETARIA'),
+  validar({ query: listarEstudiantesQuerySchema }),
   getEstudiantes
 )
 // Específica antes de /:id

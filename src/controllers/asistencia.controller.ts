@@ -4,6 +4,7 @@ import { aplanarPersona } from '../lib/persona.helper.js'
 import { validarContextoAcademicoLote } from '../lib/contexto-academico.helper.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
+import { actualizarResumenAsistencia, construirAlertasAsistencia } from '../services/asistencia-resumen.service.js'
 import { esDocenteDeAsignacion, esDocenteDelCurso, esFamiliaDeEstudiante, miEstudianteId, estudiantesDeMiTutoria, puedeVerEstudiante } from '../lib/ownership.helper.js'
 
 const ESTADOS_VALIDOS = ['PRESENTE', 'AUSENTE', 'RETRASO', 'JUSTIFICADO']
@@ -162,8 +163,8 @@ export const registrarAsistencia = asyncHandler(async (req: Request, res: Respon
     )
   )
 
-  await actualizarResumenAsistencia(docenteMateriaCursoId, trimestreId, registros.map(r => r.inscripcionId))
-  const alertas = await verificarAlertasAsistencia(docenteMateriaCursoId, trimestreId, registros.map(r => r.inscripcionId))
+  const resumenes = await actualizarResumenAsistencia(docenteMateriaCursoId, trimestreId, registros.map(r => r.inscripcionId))
+  const alertas   = await construirAlertasAsistencia(resumenes)
 
   res.status(201).json({ registrados: resultado.length, fecha, alertas })
 })
@@ -396,72 +397,6 @@ export const getReporteCurso = asyncHandler(async (req: Request, res: Response):
 // ══════════════════════════════════════
 // FUNCIONES AUXILIARES
 // ══════════════════════════════════════
-
-// v6: trimestreId ya viene guardado en cada Asistencia — ya no hace
-// falta buscar el trimestre por rango de fechas, solo agrupar por él.
-// ÚNICO escritor de ResumenAsistencia (ver comentario del schema).
-async function actualizarResumenAsistencia(
-  docenteMateriaCursoId: number,
-  trimestreId: number,
-  inscripcionIds: number[]
-) {
-  for (const inscripcionId of inscripcionIds) {
-    const registros = await prisma.asistencia.findMany({
-      where: { inscripcionId, docenteMateriaCursoId, trimestreId },
-    })
-    if (registros.length === 0) continue
-
-    const totalClases      = registros.length
-    const totalPresente    = registros.filter(r => r.estado === 'PRESENTE').length
-    const totalAusente     = registros.filter(r => r.estado === 'AUSENTE').length
-    const totalRetraso     = registros.filter(r => r.estado === 'RETRASO').length
-    const totalJustificado = registros.filter(r => r.estado === 'JUSTIFICADO').length
-    // RETRASO no cuenta como presente para el % — es una falta parcial
-    const porcentaje = ((totalPresente + totalJustificado) / totalClases) * 100
-
-    await prisma.resumenAsistencia.upsert({
-      where: {
-        inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId, docenteMateriaCursoId, trimestreId },
-      },
-      update: { totalClases, totalPresente, totalAusente, totalRetraso, totalJustificado, porcentaje },
-      create: {
-        inscripcionId, docenteMateriaCursoId, trimestreId,
-        totalClases, totalPresente, totalAusente, totalRetraso, totalJustificado, porcentaje,
-      },
-    })
-  }
-}
-
-async function verificarAlertasAsistencia(
-  docenteMateriaCursoId: number,
-  trimestreId: number,
-  inscripcionIds: number[]
-) {
-  const alertas: Array<{ inscripcionId: number; estudiante: string; porcentaje: number }> = []
-
-  for (const inscripcionId of inscripcionIds) {
-    const registros = await prisma.asistencia.findMany({
-      where: { inscripcionId, docenteMateriaCursoId, trimestreId },
-      include: { inscripcion: { include: { estudiante: { select: { persona: { select: { nombre: true, apellido: true } } } } } } },
-    })
-
-    if (registros.length === 0) continue
-
-    const presentes = registros.filter(r => r.estado === 'PRESENTE' || r.estado === 'JUSTIFICADO').length
-    const porcentaje = (presentes / registros.length) * 100
-
-    if (porcentaje < 80) {
-      const persona = registros[0].inscripcion.estudiante.persona
-      alertas.push({
-        inscripcionId,
-        estudiante: `${persona.nombre} ${persona.apellido}`,
-        porcentaje: Math.round(porcentaje * 100) / 100,
-      })
-    }
-  }
-
-  return alertas
-}
 
 async function calcularResumenAlVuelo(inscripcionId: number) {
   const asistencias = await prisma.asistencia.findMany({

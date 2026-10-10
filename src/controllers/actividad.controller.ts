@@ -11,6 +11,7 @@ import { prisma } from '../lib/prisma.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { esDocenteDeAsignacion } from '../lib/ownership.helper.js'
+import { NoEncontrado, Prohibido } from '../lib/errores.js'
 
 // GET /api/actividades
 export const getActividades = async (req: Request, res: Response): Promise<void> => {
@@ -117,7 +118,9 @@ export const createActividad = asyncHandler(async (req: Request, res: Response):
 })
 
 // PUT /api/actividades/:id
-export const updateActividad = async (req: Request, res: Response): Promise<void> => {
+// ✅ Antes no se comprobaba de quién era el registro: cualquier DOCENTE podía editar la
+// bitácora de clase de OTRO docente con solo cambiar el :id (IDOR).
+export const updateActividad = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { tema, descripcion, tareaAsignada } = req.body as {
     tema?: string
@@ -125,36 +128,35 @@ export const updateActividad = async (req: Request, res: Response): Promise<void
     tareaAsignada?: string
   }
 
-  try {
-    const existe = await prisma.bitacoraClase.findUnique({ where: { id } })
-    if (!existe) {
-      res.status(404).json({ error: 'Registro de clase no encontrado' })
-      return
-    }
-
-    const bitacora = await prisma.bitacoraClase.update({
-      where: { id },
-      data: {
-        ...(tema          !== undefined && { tema }),
-        ...(descripcion   !== undefined && { descripcion }),
-        ...(tareaAsignada !== undefined && { tareaAsignada }),
-      },
-    })
-    res.status(200).json(bitacora)
-  } catch (error) {
-    console.error('[actividad.updateActividad]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  const existe = await prisma.bitacoraClase.findUnique({ where: { id }, select: { docenteMateriaCursoId: true } })
+  if (!existe) throw new NoEncontrado('Registro de clase')
+  if (!await esDocenteDeAsignacion(req, existe.docenteMateriaCursoId)) {
+    throw new Prohibido('Solo puedes modificar tus propios registros de clase')
   }
-}
+
+  const bitacora = await prisma.bitacoraClase.update({
+    where: { id },
+    data: {
+      ...(tema          !== undefined && { tema }),
+      ...(descripcion   !== undefined && { descripcion }),
+      ...(tareaAsignada !== undefined && { tareaAsignada }),
+    },
+  })
+  res.status(200).json(bitacora)
+})
 
 // DELETE /api/actividades/:id
-export const deleteActividad = async (req: Request, res: Response): Promise<void> => {
+// ✅ Mismo control de pertenencia que el PUT (antes cualquier docente podía borrar
+// registros ajenos, y el borrado es físico: no se puede deshacer).
+export const deleteActividad = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
-  try {
-    await prisma.bitacoraClase.delete({ where: { id } })
-    res.status(200).json({ message: 'Registro de clase eliminado correctamente' })
-  } catch (error) {
-    console.error('[actividad.deleteActividad]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+
+  const existe = await prisma.bitacoraClase.findUnique({ where: { id }, select: { docenteMateriaCursoId: true } })
+  if (!existe) throw new NoEncontrado('Registro de clase')
+  if (!await esDocenteDeAsignacion(req, existe.docenteMateriaCursoId)) {
+    throw new Prohibido('Solo puedes eliminar tus propios registros de clase')
   }
-}
+
+  await prisma.bitacoraClase.delete({ where: { id } })
+  res.status(200).json({ message: 'Registro de clase eliminado correctamente' })
+})
