@@ -13,6 +13,7 @@
     "db:studio": "prisma studio",
     "db:seed": "prisma db seed",
     "db:seed:prod": "tsx prisma/seed.produccion.ts",
+    "db:seed:perfil": "tsx prisma/seeds/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

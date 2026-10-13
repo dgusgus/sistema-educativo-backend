@@ -31,9 +31,12 @@ interface PerfilConPersona { persona: { nombre: string; apellido: string } }
 // El nombre para mostrar sale del primer perfil que exista, en este orden de
 // prioridad. Con Persona compartida da igual cuál se use: el nombre es el mismo.
 // (Antes los 5 parámetros estaban tipados `any`.)
-function primerPerfil<T extends PerfilConPersona>(usuario: {
-  director: T | null; secretaria: T | null; docente: T | null; estudiante: T | null; tutor: T | null
-}): T | null {
+function primerPerfil<
+  A extends PerfilConPersona, B extends PerfilConPersona, C extends PerfilConPersona,
+  D extends PerfilConPersona, E extends PerfilConPersona,
+>(usuario: {
+  director: A | null; secretaria: B | null; docente: C | null; estudiante: D | null; tutor: E | null
+}): A | B | C | D | E | null {
   return usuario.director ?? usuario.secretaria ?? usuario.docente ?? usuario.estudiante ?? usuario.tutor ?? null
 }
 
