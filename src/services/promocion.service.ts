@@ -26,7 +26,8 @@ import type { Prisma } from '../../prisma/generated/prisma/client.js'
 import type { Nivel, Turno } from '../../prisma/generated/prisma/enums.js'
 import { ErrorDeUsuario } from '../lib/errores.js'
 import { nombreCurso, siguienteNivelGrado, NIVEL_TEXTO } from '../lib/curso.helper.js'
-import { validarProgresionInscripcion } from './progresion.service.js'
+import { cursosEsperadosLote, validarCursoContraEsperado } from './progresion.service.js'
+import { bloquearTransaccion } from '../lib/lock.js'
 
 type Db = Prisma.TransactionClient
 
@@ -190,7 +191,9 @@ export async function propuestaMatriculaCurso(
   if (!curso) throw new ErrorDeUsuario('El curso no existe en la gestión de origen', 404)
 
   const inscripciones = await db.inscripcion.findMany({
-    where:   { gestionId: origen.id, cursoId, estadoInscripcion: { in: [...ESTADOS_VIGENTES] } },
+    // Sin filtrar por estado: los retirados/transferidos se listan aparte (grupo NO_APLICA)
+    // para que la secretaría vea por qué no figuran entre los que se matriculan.
+    where:   { gestionId: origen.id, cursoId },
     include: { estudiante: { select: { id: true, persona: { select: { nombre: true, apellido: true, ci: true } } } } },
     orderBy: { estudiante: { persona: { apellido: 'asc' } } },
   })
@@ -285,8 +288,14 @@ async function cursoDeDestinoOError(
   return curso
 }
 
-// Pensado para llamarse dentro de prisma.$transaction (el controlador lo hace).
+// Debe llamarse DENTRO de prisma.$transaction (la abre el controller): el bloqueo de abajo
+// vive lo que dura esa transacción.
 export async function matricularCurso(origenId: number, pedido: PedidoMatricula, db: Db = prisma): Promise<ResultadoMatricula> {
+  // Una sola matrícula a la vez por (origen, destino): si llega un doble clic, la segunda
+  // espera, ve a los estudiantes ya inscritos y los reporta fila por fila (200) en vez de
+  // chocar con la restricción única y fallar con 409.
+  await bloquearTransaccion(db, `promocion:matricular:${origenId}:${pedido.destinoId}`)
+
   const origen  = await gestionOError(origenId, db, 'origen')
   const destino = await gestionOError(pedido.destinoId, db, 'destino')
   validarOrden(origen, destino)
@@ -311,6 +320,9 @@ export async function matricularCurso(origenId: number, pedido: PedidoMatricula,
     select: { estudianteId: true, curso: { select: { nivel: true, grado: true, paralelo: true, turno: true } } },
   })
   const matriculadoEn = new Map(yaInscritos.map(i => [i.estudianteId, nombreCurso(i.curso)]))
+
+  // La progresión de TODOS los estudiantes en una consulta (antes: una por estudiante).
+  const esperados = await cursosEsperadosLote(inscripciones.map(i => i.estudianteId), destino.anio, db)
 
   const errores: ResultadoMatricula['errores'] = []
   const aCrear: { estudianteId: number; cursoId: number; gestionId: number }[] = []
@@ -340,7 +352,7 @@ export async function matricularCurso(origenId: number, pedido: PedidoMatricula,
 
     // Red de seguridad: la progresión según TODO su historial.
     try {
-      await validarProgresionInscripcion(insc.estudianteId, destinoCurso, destino.anio, db)
+      validarCursoContraEsperado(esperados.get(insc.estudianteId)!, destinoCurso)
     } catch (e) {
       if (e instanceof ErrorDeUsuario) { falla(e.message); continue }
       throw e

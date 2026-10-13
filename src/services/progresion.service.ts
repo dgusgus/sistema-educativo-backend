@@ -35,21 +35,21 @@ export type CursoEsperado =
   | { tipo: 'EGRESADO';  motivo: string }
   | { tipo: 'PENDIENTE'; motivo: string }
 
-// Mira la última inscripción ANTERIOR al año indicado.
-export async function cursoEsperadoEstudiante(
-  estudianteId: number,
-  anioDestino: number,
-  db: Db = prisma,
-): Promise<CursoEsperado> {
-  const previa = await db.inscripcion.findFirst({
-    where:   { estudianteId, gestion: { anio: { lt: anioDestino } } },
-    orderBy: { gestion: { anio: 'desc' } },
-    include: {
-      curso:   { select: { nivel: true, grado: true } },
-      gestion: { select: { anio: true } },
-    },
-  })
+type PreviaInscripcion = {
+  estadoInscripcion: string
+  resultado: string
+  curso:   { nivel: Nivel; grado: number }
+  gestion: { anio: number }
+}
 
+const INCLUDE_PREVIA = {
+  curso:   { select: { nivel: true, grado: true } },
+  gestion: { select: { anio: true } },
+} as const
+
+// Regla pura (sin base de datos): dada la última inscripción previa, qué corresponde.
+// Separada del acceso a datos para poder usarla igual en una consulta o en un lote.
+function esperadoDesdePrevia(previa: PreviaInscripcion | null | undefined): CursoEsperado {
   if (!previa) return { tipo: 'LIBRE', motivo: 'Nuevo ingreso: puede inscribirse en cualquier curso' }
 
   const anterior = `${etiquetaGrado(previa.curso)} en ${previa.gestion.anio}`
@@ -79,15 +79,40 @@ export async function cursoEsperadoEstudiante(
   return { tipo: 'PENDIENTE', motivo: `Su inscripción de ${previa.gestion.anio} (${etiquetaGrado(previa.curso)}) no tiene resultado final registrado` }
 }
 
-// Lanza 409 si el curso elegido no es el que le corresponde.
-export async function validarProgresionInscripcion(
+// Mira la última inscripción ANTERIOR al año indicado.
+export async function cursoEsperadoEstudiante(
   estudianteId: number,
-  curso: { nivel: Nivel; grado: number },
   anioDestino: number,
   db: Db = prisma,
-): Promise<void> {
-  const esperado = await cursoEsperadoEstudiante(estudianteId, anioDestino, db)
+): Promise<CursoEsperado> {
+  const previa = await db.inscripcion.findFirst({
+    where:   { estudianteId, gestion: { anio: { lt: anioDestino } } },
+    orderBy: { gestion: { anio: 'desc' } },
+    include: INCLUDE_PREVIA,
+  })
+  return esperadoDesdePrevia(previa)
+}
 
+// Lo mismo para MUCHOS estudiantes con UNA sola consulta (antes: una por estudiante,
+// hasta 500 viajes a la base dentro de la transacción de la matrícula masiva).
+export async function cursosEsperadosLote(
+  estudianteIds: number[],
+  anioDestino: number,
+  db: Db = prisma,
+): Promise<Map<number, CursoEsperado>> {
+  const previas = estudianteIds.length === 0 ? [] : await db.inscripcion.findMany({
+    where:   { estudianteId: { in: estudianteIds }, gestion: { anio: { lt: anioDestino } } },
+    orderBy: { gestion: { anio: 'desc' } },
+    include: INCLUDE_PREVIA,
+  })
+  // Ordenadas de la más reciente a la más antigua: la primera de cada estudiante es la última.
+  const ultima = new Map<number, PreviaInscripcion>()
+  for (const p of previas) if (!ultima.has(p.estudianteId)) ultima.set(p.estudianteId, p)
+  return new Map(estudianteIds.map(id => [id, esperadoDesdePrevia(ultima.get(id))]))
+}
+
+// Lanza 409 si el curso elegido no es el que le corresponde (regla pura).
+export function validarCursoContraEsperado(esperado: CursoEsperado, curso: { nivel: Nivel; grado: number }): void {
   if (esperado.tipo === 'LIBRE') return
   if (esperado.tipo === 'EGRESADO')  throw new ErrorDeUsuario(`${esperado.motivo}: no corresponde inscribirlo de nuevo`, 409)
   if (esperado.tipo === 'PENDIENTE') throw new ErrorDeUsuario(`${esperado.motivo}. Registrar primero su resultado en Promoción`, 409)
@@ -98,6 +123,16 @@ export async function validarProgresionInscripcion(
       409,
     )
   }
+}
+
+// Lanza 409 si el curso elegido no es el que le corresponde.
+export async function validarProgresionInscripcion(
+  estudianteId: number,
+  curso: { nivel: Nivel; grado: number },
+  anioDestino: number,
+  db: Db = prisma,
+): Promise<void> {
+  validarCursoContraEsperado(await cursoEsperadoEstudiante(estudianteId, anioDestino, db), curso)
 }
 
 // ─── Historial académico ─────────────────────────────────────────────────────
