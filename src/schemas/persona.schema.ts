@@ -8,6 +8,7 @@ import {
   booleano, ci, emailOpc, enumES, fecha, id, opcional, passwordNueva,
   telefonoOpc, textoOpc, textoReq, username,
 } from './common.schema.js'
+import { paginacionSchema } from '../lib/paginacion.js'
 
 export const PARENTESCOS = ['PADRE', 'MADRE', 'ABUELO', 'ABUELA', 'TIO', 'TIA', 'HERMANO', 'HERMANA', 'TUTOR_LEGAL', 'OTRO'] as const
 
@@ -90,3 +91,14 @@ export const asignarCuentaSchema = z.object({ usuarioId: id })
 
 export const createSecretariaConCuentaSchema = personaPlana.extend(camposCuenta)
 export const updateSecretariaSchema = personaParcial.extend({ activo: booleano.optional() })
+// ─── Listado de estudiantes (query string) ───────────────────────────────────
+// `search` se limita a 100 caracteres: se usa en `contains` con ILIKE y una cadena
+// enorme obligaría a PostgreSQL a escanear cada fila contra un patrón gigante.
+export const listarEstudiantesQuerySchema = z.object({
+  search:            z.string().trim().max(100, 'máximo 100 caracteres').optional(),
+  cursoId:           opcional(id),
+  gestionId:         opcional(id),
+  estadoInscripcion: opcional(enumES(['ACTIVA', 'RETIRADA', 'TRANSFERIDA', 'CONCLUIDA'])),
+  ...paginacionSchema,
+})
+export type ListarEstudiantesQuery = z.infer<typeof listarEstudiantesQuerySchema>

@@ -1,90 +1,117 @@
 // src/lib/calificacion.helper.ts
 //
-// v6 reemplaza la nota única por trimestre por un modelo de dimensiones
-// (Ley 070: Ser/Saber/Hacer/Decidir, aunque el nombre y peso de cada
-// dimensión son configurables por gestión vía DimensionEvaluacion):
+// ÚNICO escritor de CalificacionDimension.promedio y Calificacion.promedioTrimestral
+// (tal como pide el comentario del schema). Se llama después de cualquier cambio
+// en NotaActividad. La matemática vive en calificacion.calculo.ts (pura y testeada);
+// este archivo solo lee los datos, llama al cálculo y guarda el resultado.
 //
-//   NotaActividad (única fuente de verdad, una nota por actividad y
-//   estudiante) → se agrupan por ActividadEvaluativa.dimensionId →
-//   promedio ponderado por dimensión (CalificacionDimension) →
-//   promedio ponderado final (Calificacion.promedioTrimestral).
+// ── Qué cambió y por qué ────────────────────────────────────────────────────
+// Antes, por CADA estudiante se ejecutaban ~3 + 2×(dimensiones) consultas, una tras
+// otra y sin transacción. Al registrar las notas de un curso de 40 estudiantes con
+// 4 dimensiones eran ~480 consultas secuenciales y, si una fallaba a la mitad, quedaban
+// promedios de unos estudiantes actualizados y de otros no.
 //
-// recalcularCalificacion() es el ÚNICO lugar que escribe
-// CalificacionDimension.promedio y Calificacion.promedioTrimestral, tal
-// como pide el comentario del schema. Se llama después de cualquier
-// cambio en NotaActividad.
-//
-// Supuesto de cálculo (documentado porque no está en el schema):
-// cada actividad se normaliza a un porcentaje (nota/puntajeMaximo),
-// esos porcentajes se ponderan por ActividadEvaluativa.peso dentro de
-// su dimensión, y el resultado (0-1) se multiplica por
-// DimensionEvaluacion.puntajeMaximo para guardar CalificacionDimension
-// en la escala propia de la dimensión. El promedio trimestral final
-// vuelve a normalizar cada dimensión a porcentaje, pondera por
-// DimensionEvaluacion.pesoEnPromedio, y multiplica por 100 (escala
-// Ley 070). Una dimensión sin ninguna nota registrada todavía
-// simplemente no entra en el promedio (no cuenta como 0).
+// Ahora, para TODO el lote: 4 lecturas fijas (sin importar cuántos estudiantes) y las
+// escrituras en UNA transacción: o se guardan todos los promedios o ninguno.
 
 import { prisma } from './prisma.js'
+import type { Prisma } from '../../prisma/generated/prisma/client.js'
+import { calcularPromedioTrimestral, type ActividadCalculo } from './calificacion.calculo.js'
 
+export interface PromedioCalculado {
+  inscripcionId:      number
+  promedioTrimestral: number | null
+}
+
+export async function recalcularCalificaciones(
+  inscripcionIds: number[],
+  docenteMateriaCursoId: number,
+  trimestreId: number,
+): Promise<PromedioCalculado[]> {
+  const ids = [...new Set(inscripcionIds)]
+  if (ids.length === 0) return []
+
+  // 1-2) Configuración: dimensiones de la gestión
+  const dmc = await prisma.docenteMateriaCurso.findUniqueOrThrow({
+    where:  { id: docenteMateriaCursoId },
+    select: { gestionId: true },
+  })
+  const dimensiones = await prisma.dimensionEvaluacion.findMany({
+    where:   { gestionId: dmc.gestionId },
+    orderBy: { orden: 'asc' },
+    select:  { id: true, puntajeMaximo: true, pesoEnPromedio: true },
+  })
+  const dimensionesCalculo = dimensiones.map(d => ({
+    id: d.id, puntajeMaximo: Number(d.puntajeMaximo), pesoEnPromedio: Number(d.pesoEnPromedio),
+  }))
+
+  // 3) Actividades activas con las notas de ESTOS estudiantes (una sola consulta)
+  const actividadesBD = await prisma.actividadEvaluativa.findMany({
+    where:  { docenteMateriaCursoId, trimestreId, activo: true },
+    select: {
+      dimensionId: true, puntajeMaximo: true, peso: true,
+      notas: { where: { inscripcionId: { in: ids } }, select: { inscripcionId: true, nota: true } },
+    },
+  })
+
+  // Índice nota por (actividad, estudiante) para no buscar en listas dentro del bucle
+  const actividades = actividadesBD.map(a => ({
+    dimensionId:   a.dimensionId,
+    puntajeMaximo: Number(a.puntajeMaximo),
+    peso:          Number(a.peso),
+    notaPorInscripcion: new Map(a.notas.map(n => [n.inscripcionId, Number(n.nota)] as const)),
+  }))
+
+  // 4) Asegurar que exista la fila Calificacion de cada estudiante y traer sus ids
+  await prisma.calificacion.createMany({
+    data: ids.map(inscripcionId => ({ inscripcionId, docenteMateriaCursoId, trimestreId })),
+    skipDuplicates: true,
+  })
+  const calificaciones = await prisma.calificacion.findMany({
+    where:  { inscripcionId: { in: ids }, docenteMateriaCursoId, trimestreId },
+    select: { id: true, inscripcionId: true },
+  })
+  const calificacionIdPorInscripcion = new Map(calificaciones.map(c => [c.inscripcionId, c.id]))
+
+  // Cálculo en memoria + escrituras preparadas
+  const resultados: PromedioCalculado[] = []
+  const escrituras: Prisma.PrismaPromise<unknown>[] = []
+
+  for (const inscripcionId of ids) {
+    const calificacionId = calificacionIdPorInscripcion.get(inscripcionId)
+    if (calificacionId === undefined) continue   // no debería pasar: se acaba de crear
+
+    const delEstudiante: ActividadCalculo[] = actividades.map(a => ({
+      dimensionId:   a.dimensionId,
+      puntajeMaximo: a.puntajeMaximo,
+      peso:          a.peso,
+      nota:          a.notaPorInscripcion.get(inscripcionId) ?? null,
+    }))
+
+    const { promediosDimension, promedioTrimestral } = calcularPromedioTrimestral(dimensionesCalculo, delEstudiante)
+
+    for (const [dimensionId, promedio] of promediosDimension) {
+      escrituras.push(prisma.calificacionDimension.upsert({
+        where:  { calificacionId_dimensionId: { calificacionId, dimensionId } },
+        update: { promedio },
+        create: { calificacionId, dimensionId, promedio },
+      }))
+    }
+    escrituras.push(prisma.calificacion.update({ where: { id: calificacionId }, data: { promedioTrimestral } }))
+    resultados.push({ inscripcionId, promedioTrimestral })
+  }
+
+  // 5) Todo o nada
+  await prisma.$transaction(escrituras)
+  return resultados
+}
+
+// Versión de un solo estudiante (compatibilidad con el código existente).
 export async function recalcularCalificacion(
   inscripcionId: number,
   docenteMateriaCursoId: number,
-  trimestreId: number
-) {
-  const dmc = await prisma.docenteMateriaCurso.findUniqueOrThrow({
-    where: { id: docenteMateriaCursoId },
-    select: { gestionId: true },
-  })
-
-  const dimensiones = await prisma.dimensionEvaluacion.findMany({
-    where: { gestionId: dmc.gestionId },
-    orderBy: { orden: 'asc' },
-  })
-
-  const calificacion = await prisma.calificacion.upsert({
-    where: { inscripcionId_docenteMateriaCursoId_trimestreId: { inscripcionId, docenteMateriaCursoId, trimestreId } },
-    update: {},
-    create: { inscripcionId, docenteMateriaCursoId, trimestreId },
-  })
-
-  let sumaPonderada = 0
-  let sumaPesos     = 0
-
-  for (const dimension of dimensiones) {
-    const actividades = await prisma.actividadEvaluativa.findMany({
-      where: { docenteMateriaCursoId, trimestreId, dimensionId: dimension.id, activo: true },
-      include: { notas: { where: { inscripcionId } } },
-    })
-
-    const evaluadas = actividades.filter(a => a.notas.length > 0)
-    if (evaluadas.length === 0) continue // sin notas en esta dimensión todavía — no cuenta como 0
-
-    let sumaPctPonderada  = 0
-    let sumaPesoActividad = 0
-    for (const act of evaluadas) {
-      const pct = Number(act.notas[0].nota) / Number(act.puntajeMaximo)
-      sumaPctPonderada  += pct * Number(act.peso)
-      sumaPesoActividad += Number(act.peso)
-    }
-    const pctDimension       = sumaPctPonderada / sumaPesoActividad
-    const promedioDimension  = pctDimension * Number(dimension.puntajeMaximo)
-
-    await prisma.calificacionDimension.upsert({
-      where: { calificacionId_dimensionId: { calificacionId: calificacion.id, dimensionId: dimension.id } },
-      update: { promedio: promedioDimension },
-      create: { calificacionId: calificacion.id, dimensionId: dimension.id, promedio: promedioDimension },
-    })
-
-    sumaPonderada += pctDimension * Number(dimension.pesoEnPromedio)
-    sumaPesos     += Number(dimension.pesoEnPromedio)
-  }
-
-  const promedioTrimestral = sumaPesos > 0 ? Math.round(sumaPonderada / sumaPesos * 100 * 100) / 100 : null
-
-  return prisma.calificacion.update({
-    where: { id: calificacion.id },
-    data:  { promedioTrimestral },
-    include: { dimensiones: { include: { dimension: true } } },
-  })
-}       
+  trimestreId: number,
+): Promise<PromedioCalculado> {
+  const [resultado] = await recalcularCalificaciones([inscripcionId], docenteMateriaCursoId, trimestreId)
+  return resultado ?? { inscripcionId, promedioTrimestral: null }
+}

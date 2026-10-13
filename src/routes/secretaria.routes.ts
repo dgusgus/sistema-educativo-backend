@@ -6,11 +6,12 @@ import {
   updateSecretaria,
   asignarCuentaSecretaria,
 } from '../controllers/secretaria.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
-
+import { paramEntero } from '../middlewares/validate.middleware.js'
 const router = Router()
-router.use(authMiddleware)
+
+// Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
+router.param('id', paramEntero)
 
 router.get('/',            requireRol('DIRECTOR'),               getSecretarias)
 router.get('/:id',         requireRol('DIRECTOR'),               getSecretariaById)

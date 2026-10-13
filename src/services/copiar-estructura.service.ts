@@ -24,6 +24,7 @@
 import { prisma } from '../lib/prisma.js'
 import type { Prisma } from '../../prisma/generated/prisma/client.js'
 import { ErrorDeUsuario } from '../lib/errores.js'
+import { bloquearTransaccion } from '../lib/lock.js'
 
 type Db = Prisma.TransactionClient
 
@@ -83,6 +84,11 @@ export async function copiarEstructura(
   if (!Object.values(op).some(Boolean)) throw new ErrorDeUsuario('Elegí al menos una parte de la estructura para copiar')
   if (origenId === destinoId)            throw new ErrorDeUsuario('La gestión de origen y la de destino no pueden ser la misma')
 
+  // Una copia a la vez hacia un mismo destino. Sin esto, dos peticiones simultáneas
+  // duplicaban los conceptos de pago (esa tabla no tiene restricción única).
+  // Debe llamarse DENTRO de prisma.$transaction.
+  await bloquearTransaccion(db, `promocion:copiar:${destinoId}`)
+
   const [origen, destino] = await Promise.all([
     db.gestion.findUnique({ where: { id: origenId },  select: { id: true, anio: true } }),
     db.gestion.findUnique({ where: { id: destinoId }, select: { id: true, anio: true } }),
@@ -112,19 +118,19 @@ export async function copiarEstructura(
     const activos    = new Set(docentesActivos.map(d => d.id))
     let guiaPerdido  = 0
 
+    const aCrear: Prisma.CursoCreateManyInput[] = []
     for (const c of delOrigen) {
       if (existentes.has(claveCurso(c))) { r.cursos.yaExistian++; continue }
       const guiaVigente = c.tutorDocenteId !== null && activos.has(c.tutorDocenteId)
       if (c.tutorDocenteId !== null && !guiaVigente) guiaPerdido++
-      await db.curso.create({
-        data: {
-          nivel: c.nivel, grado: c.grado, paralelo: c.paralelo, turno: c.turno,
-          capacidad: c.capacidad, gestionId: destino.id,
-          tutorDocenteId: guiaVigente ? c.tutorDocenteId : null,
-        },
+      aCrear.push({
+        nivel: c.nivel, grado: c.grado, paralelo: c.paralelo, turno: c.turno,
+        capacidad: c.capacidad, gestionId: destino.id,
+        tutorDocenteId: guiaVigente ? c.tutorDocenteId : null,
       })
-      r.cursos.copiados++
     }
+    // Un solo INSERT (antes: uno por curso). skipDuplicates respeta la única (nivel, grado, paralelo, turno, gestión).
+    if (aCrear.length) r.cursos.copiados = (await db.curso.createMany({ data: aCrear, skipDuplicates: true })).count
     if (guiaPerdido) r.avisos.push(`${guiaPerdido} curso(s) quedaron sin docente guía porque el de ${origen.anio} ya no está activo`)
   }
 
@@ -179,17 +185,16 @@ export async function copiarEstructura(
       db.trimestre.findMany({ where: { gestionId: destino.id }, select: { numero: true } }),
     ])
     const existentes = new Set(delDestino.map(t => t.numero))
+    const aCrear: Prisma.TrimestreCreateManyInput[] = []
     for (const t of delOrigen) {
       if (existentes.has(t.numero)) { r.trimestres.yaExistian++; continue }
-      await db.trimestre.create({
-        data: {
-          numero: t.numero, nombre: t.nombre, gestionId: destino.id,
-          fechaInicio: desplazarAnios(t.fechaInicio, difAnios),
-          fechaFin:    desplazarAnios(t.fechaFin, difAnios),
-        },
+      aCrear.push({
+        numero: t.numero, nombre: t.nombre, gestionId: destino.id,
+        fechaInicio: desplazarAnios(t.fechaInicio, difAnios),
+        fechaFin:    desplazarAnios(t.fechaFin, difAnios),
       })
-      r.trimestres.copiados++
     }
+    if (aCrear.length) r.trimestres.copiados = (await db.trimestre.createMany({ data: aCrear, skipDuplicates: true })).count
     if (r.trimestres.copiados) r.avisos.push(`Revisá las fechas de los trimestres: se copiaron desplazadas ${difAnios} año(s)`)
   }
 
@@ -217,17 +222,16 @@ export async function copiarEstructura(
     ])
     // ConceptoPago no tiene restricción única: se evita duplicar por nombre.
     const existentes = new Set(delDestino.map(c => c.nombre.trim().toLowerCase()))
+    const aCrear: Prisma.ConceptoPagoCreateManyInput[] = []
     for (const c of delOrigen) {
       if (existentes.has(c.nombre.trim().toLowerCase())) { r.conceptosPago.yaExistian++; continue }
-      await db.conceptoPago.create({
-        data: {
-          gestionId: destino.id, nombre: c.nombre, descripcion: c.descripcion, monto: c.monto,
-          obligatorio: c.obligatorio, aplicarMora: c.aplicarMora, porcentajeMora: c.porcentajeMora,
-          fechaVencimiento: c.fechaVencimiento ? desplazarAnios(c.fechaVencimiento, difAnios) : null,
-        },
+      aCrear.push({
+        gestionId: destino.id, nombre: c.nombre, descripcion: c.descripcion, monto: c.monto,
+        obligatorio: c.obligatorio, aplicarMora: c.aplicarMora, porcentajeMora: c.porcentajeMora,
+        fechaVencimiento: c.fechaVencimiento ? desplazarAnios(c.fechaVencimiento, difAnios) : null,
       })
-      r.conceptosPago.copiados++
     }
+    if (aCrear.length) r.conceptosPago.copiados = (await db.conceptoPago.createMany({ data: aCrear })).count
     if (r.conceptosPago.copiados) r.avisos.push('Revisá los montos y las fechas de vencimiento de los conceptos de pago copiados')
   }
 

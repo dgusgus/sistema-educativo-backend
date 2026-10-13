@@ -4,11 +4,9 @@ import {
   getReporteAcademico,
   getReporteAcademicoPDF,
 } from '../controllers/reporte.controller.js'
-import { authMiddleware } from '../middlewares/auth.middleware.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
 
 const router = Router()
-router.use(authMiddleware)
 
 // Dashboard — solo Director
 router.get(

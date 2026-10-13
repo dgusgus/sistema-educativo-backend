@@ -12,7 +12,12 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "db:seed": "prisma db seed",
-    "db:seed:prod": "tsx prisma/seed.produccion.ts"
+    "db:seed:prod": "tsx prisma/seed.produccion.ts",
+    "db:seed:perfil": "tsx prisma/seeds/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:pretty": "tsx watch src/server.ts | pino-pretty"
   },
   "keywords": [],
   "author": "",
@@ -32,6 +37,8 @@
     "multer": "^2.4.0",
     "pdfkit": "^0.19.1",
     "pg": "^8.21.0",
+    "pino": "^9.14.0",
+    "pino-http": "^10.5.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -42,9 +49,13 @@
     "@types/node": "^25.9.3",
     "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.20.0",
+    "@types/supertest": "^6.0.3",
+    "pino-pretty": "^13.2.0",
     "prisma": "^7.8.0",
+    "supertest": "^7.3.1",
     "tsx": "^4.22.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
   },
   "packageManager": "pnpm@12.6.0"
 }
