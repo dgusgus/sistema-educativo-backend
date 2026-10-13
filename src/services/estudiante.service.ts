@@ -17,6 +17,8 @@ import type { ListarEstudiantesQuery } from '../schemas/persona.schema.js'
 export async function listarEstudiantes(q: ListarEstudiantesQuery) {
   const { search, cursoId, gestionId, estadoInscripcion } = q
 
+  const palabras = (search ?? '').split(/\s+/).filter(Boolean).slice(0, 5)
+
   const filtroInscripcion =
     cursoId !== undefined || gestionId !== undefined || estadoInscripcion !== undefined
       ? { some: {
@@ -30,12 +32,15 @@ export async function listarEstudiantes(q: ListarEstudiantesQuery) {
 
   const where = {
     activo: true,
-    persona: search
-      ? { OR: [
-          { nombre:   { contains: search, mode: 'insensitive' as const } },
-          { apellido: { contains: search, mode: 'insensitive' as const } },
-          { ci:       { contains: search } },
-        ] }
+    // Cada palabra debe aparecer en el nombre, el apellido o el CI: "juan perez" encuentra
+    // a Juan Pérez aunque estén en campos distintos (antes solo buscaba la frase completa
+    // dentro de UN campo, y el frontend lo compensaba filtrando en el navegador).
+    persona: palabras.length
+      ? { AND: palabras.map(p => ({ OR: [
+          { nombre:   { contains: p, mode: 'insensitive' as const } },
+          { apellido: { contains: p, mode: 'insensitive' as const } },
+          { ci:       { contains: p } },
+        ] })) }
       : undefined,
     inscripciones: filtroInscripcion,
   }
