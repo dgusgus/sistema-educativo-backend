@@ -31,6 +31,7 @@ import directorRoutes     from './routes/director.routes.js'
 import secretariaRoutes   from './routes/secretaria.routes.js'
 import institucionRoutes  from './routes/institucion.routes.js'
 import horarioRoutes      from './routes/horario.routes.js'
+import cuadernoRoutes     from './routes/cuaderno.routes.js'
 import { authMiddleware } from './middlewares/auth.middleware.js'
 import { errorMiddleware, notFoundMiddleware } from './middlewares/error.middleware.js'
 
@@ -145,6 +146,7 @@ app.use('/api/pagos',          pagoRoutes)
 app.use('/api/boletin',        boletinRoutes)
 app.use('/api/institucion',    institucionRoutes)
 app.use('/api/horarios',       horarioRoutes)
+app.use('/api/cuaderno',       cuadernoRoutes)
 
 // Routers que definen sus propias rutas completas bajo /api
 // (/dimensiones, /actividades-evaluativas, /dashboard, /reportes/...).
