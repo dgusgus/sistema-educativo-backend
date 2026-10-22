@@ -30,6 +30,7 @@ import reporteRoutes      from './routes/reporte.routes.js'
 import directorRoutes     from './routes/director.routes.js'
 import secretariaRoutes   from './routes/secretaria.routes.js'
 import institucionRoutes  from './routes/institucion.routes.js'
+import { getInstitucionPublica } from './controllers/institucion.controller.js'
 import horarioRoutes      from './routes/horario.routes.js'
 import cuadernoRoutes     from './routes/cuaderno.routes.js'
 import { authMiddleware } from './middlewares/auth.middleware.js'
@@ -115,6 +116,8 @@ app.get('/api/ready', async (_req, res) => {
 // auth.routes.ts mezcla rutas públicas (login) y protegidas (me, password): cada
 // ruta protegida ya declara authMiddleware dentro del propio router.
 app.use('/api/auth', authRoutes)
+// Nombre y ubicación del colegio para la pantalla de login (antes de iniciar sesión, sin datos sensibles).
+app.get('/api/institucion/publica', getInstitucionPublica)
 
 // ─── Autenticación: UNA sola vez para todo lo demás ──────────────────────────
 // Los routers ya NO hacen router.use(authMiddleware). Antes, evaluacionRoutes y

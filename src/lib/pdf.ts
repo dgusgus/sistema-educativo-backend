@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit'
+import { institucionActual } from './institucion.helper.js'
 
 // ─── Colores institucionales ──────────────────────────────────────────────────
 export const COLORES = {
@@ -19,9 +20,9 @@ export const crearDocumento = () => {
     size: 'A4',
     margins: { top: 50, bottom: 50, left: 50, right: 50 },
     info: {
-      Title:    'U.E. Los Ángeles de Nazaria Ignacia',
+      Title:    institucionActual().nombre,
       Author:   'Sistema Web Académico',
-      Creator:  'Sistema Web U.E. Los Ángeles',
+      Creator:  `Sistema Web Académico - ${institucionActual().nombre}`,
     },
   })
 }
@@ -33,7 +34,12 @@ export const dibujarEncabezado = (doc: PDFKit.PDFDocument) => {
     .rect(50, 50, doc.page.width - 100, 80)
     .fill(COLORES.azulOscuro)
 
-  // Nombre de la institución
+  // Datos del colegio: salen de la tabla Institucion (pantalla "Datos de la Institución")
+  const inst = institucionActual()
+  const ubicacion = [inst.direccion, [inst.municipio, inst.departamento].filter(Boolean).join(', ')]
+    .filter(Boolean).join(' — ')
+  const linea = [ubicacion, inst.rue ? `RUE: ${inst.rue}` : ''].filter(Boolean).join(' | ')
+
   doc
     .fillColor(COLORES.blanco)
     .fontSize(14)
@@ -41,8 +47,8 @@ export const dibujarEncabezado = (doc: PDFKit.PDFDocument) => {
     .text('UNIDAD EDUCATIVA', 60, 62, { align: 'center', width: doc.page.width - 120 })
 
   doc
-    .fontSize(16)
-    .text('"LOS ÁNGELES DE NAZARIA IGNACIA"', 60, 80, {
+    .fontSize(inst.nombre.length > 40 ? 13 : 16)
+    .text(`"${inst.nombre.toUpperCase()}"`, 60, 80, {
       align: 'center',
       width: doc.page.width - 120,
     })
@@ -50,7 +56,7 @@ export const dibujarEncabezado = (doc: PDFKit.PDFDocument) => {
   doc
     .fontSize(9)
     .font('Helvetica')
-    .text('Urb. Bustillos, Zona Los Ángeles — Oruro, Bolivia | RUE: 81230370', 60, 103, {
+    .text(linea, 60, 103, {
       align: 'center',
       width: doc.page.width - 120,
     })
@@ -82,7 +88,7 @@ export const dibujarPiePagina = (doc: PDFKit.PDFDocument, pagina: number) => {
     .fontSize(8)
     .font('Helvetica')
     .text(
-      `Sistema Web Académico U.E. Los Ángeles de Nazaria Ignacia`,
+      `Sistema Web Académico - ${institucionActual().nombre}`,
       50, y,
       { align: 'left', width: 300 }
     )

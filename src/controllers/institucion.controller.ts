@@ -1,72 +1,66 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { refrescarInstitucion } from '../lib/institucion.helper.js'
+
+// Lo que se muestra SIN iniciar sesión (pantalla de login): solo datos públicos del colegio.
+// No incluye teléfono ni correo.
+export const getInstitucionPublica = asyncHandler(async (_req: Request, res: Response): Promise<void> => {
+  const i = await prisma.institucion.findUnique({ where: { id: 1 } })
+  res.status(200).json(i ? {
+    configurada: true,
+    nombre: i.nombre,
+    direccion: i.direccion,
+    rue: i.rue,
+    municipio: i.municipio,
+    departamento: i.departamento,
+    logoUrl: i.logoUrl,
+  } : { configurada: false })
+})
 
 // GET /api/institucion
-// Para qué: cualquier módulo que necesite los datos del colegio
-// (boletines, reportes, encabezados)
-export const getInstitucion = async (_req: Request, res: Response): Promise<void> => {
-  try {
-    const institucion = await prisma.institucion.findUnique({
-      where: { id: 1 },
-    })
+// Para qué: cualquier módulo que necesite los datos del colegio (boletines, reportes, encabezados).
+// Incluye al director de la gestión activa (para firmas e impresos).
+export const getInstitucion = asyncHandler(async (_req: Request, res: Response): Promise<void> => {
+  const [institucion, gestion] = await Promise.all([
+    prisma.institucion.findUnique({ where: { id: 1 } }),
+    prisma.gestion.findFirst({
+      where: { activa: true },
+      select: { director: { select: { persona: { select: { nombre: true, apellido: true } } } } },
+    }),
+  ])
 
-    if (!institucion) {
-      res.status(404).json({ error: 'Datos de la institución no configurados' })
-      return
-    }
-
-    res.status(200).json(institucion)
-  } catch (error) {
-    console.error('[institucion.getInstitucion]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  if (!institucion) {
+    res.status(404).json({ error: 'Datos de la institución no configurados' })
+    return
   }
-}
+  const p = gestion?.director?.persona
+  res.status(200).json({ ...institucion, directorNombre: p ? `${p.nombre} ${p.apellido}` : null })
+})
 
-// PUT /api/institucion
-// Solo el Director puede actualizar los datos del colegio
-export const updateInstitucion = async (req: Request, res: Response): Promise<void> => {
-  const { nombre, direccion, telefono, email, rue, logoUrl, municipio, departamento } =
-    req.body as {
-      nombre?:       string
-      direccion?:    string
-      telefono?:     string
-      email?:        string
-      rue?:          string
-      logoUrl?:      string
-      municipio?:    string
-      departamento?: string
-    }
+// PUT /api/institucion  (solo Director; el cuerpo ya viene validado)
+// Crea los datos la primera vez y los actualiza después. Ya no hay valores por defecto:
+// lo que no se envía queda vacío, así ningún dato de otro colegio se "cuela".
+export const updateInstitucion = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const b = req.body as Record<string, unknown>
+  const limpio = (v: unknown) => (typeof v === 'string' ? (v.trim() === '' ? null : v.trim()) : v ?? null)
 
-  try {
-    // upsert — crea si no existe, actualiza si ya existe
-    const institucion = await prisma.institucion.upsert({
-      where:  { id: 1 },
-      update: {
-        ...(nombre       !== undefined && { nombre }),
-        ...(direccion    !== undefined && { direccion }),
-        ...(telefono     !== undefined && { telefono }),
-        ...(email        !== undefined && { email }),
-        ...(rue          !== undefined && { rue }),
-        ...(logoUrl      !== undefined && { logoUrl }),
-        ...(municipio    !== undefined && { municipio }),
-        ...(departamento !== undefined && { departamento }),
-      },
-      create: {
-        id:          1,
-        nombre:      nombre ?? 'U.E. Los Ángeles de Nazaria Ignacia',
-        direccion:   direccion ?? 'Urb. Bustillos, Zona Los Ángeles, Oruro',
-        telefono,
-        email,
-        rue:         rue ?? '81230370',
-        logoUrl,
-        municipio:   municipio ?? 'Oruro',
-        departamento: departamento ?? 'Oruro',
-      },
-    })
-
-    res.status(200).json(institucion)
-  } catch (error) {
-    console.error('[institucion.updateInstitucion]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+  const datos = {
+    nombre: String(b.nombre),
+    direccion: limpio(b.direccion) as string | null,
+    telefono: limpio(b.telefono) as string | null,
+    email: limpio(b.email) as string | null,
+    rue: limpio(b.rue) as string | null,
+    logoUrl: limpio(b.logoUrl) as string | null,
+    municipio: limpio(b.municipio) as string | null,
+    distrito: limpio(b.distrito) as string | null,
+    departamento: limpio(b.departamento) as string | null,
+    dependencia: (b.dependencia ?? null) as 'FISCAL' | 'CONVENIO' | 'PRIVADO' | null,
   }
-}
+
+  const institucion = await prisma.institucion.upsert({
+    where: { id: 1 }, update: datos, create: { id: 1, ...datos },
+  })
+  await refrescarInstitucion()          // los PDF usan el dato nuevo de inmediato
+  res.status(200).json(institucion)
+})

@@ -66,6 +66,13 @@ enum MetodoPago {
   QR
 }
 
+// Cómo se cobra un concepto: una sola vez (matrícula), cada mes (pensión) o cada trimestre.
+enum Periodicidad {
+  UNICO
+  MENSUAL
+  TRIMESTRAL
+}
+
 enum EstadoPago {
   PAGADO
   PARCIAL
@@ -141,6 +148,7 @@ model Institucion {
   rue          String?
   logoUrl      String?
   municipio    String?
+  distrito     String?
   departamento String?
   dependencia  Dependencia?
 
@@ -423,6 +431,7 @@ model Trimestre {
   bitacoras              BitacoraClase[]
   resumenAsistencias     ResumenAsistencia[]
   asistencias            Asistencia[]
+  conceptosPago          ConceptoPago[]
 
   @@unique([numero, gestionId])
   @@unique([id, gestionId])
@@ -775,17 +784,22 @@ model ConceptoPago {
   aplicarMora      Boolean   @default(false)
   porcentajeMora   Decimal   @default(0) @db.Decimal(5, 2)
   activo           Boolean   @default(true)
+  periodicidad     Periodicidad @default(UNICO)
+  // Trimestre al que pertenece la cuota (opcional). Sin él, el periodo se deduce de fechaVencimiento.
+  trimestreId      Int?
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
   gestionId Int
   gestion   Gestion @relation(fields: [gestionId], references: [id], onDelete: Restrict)
+  trimestre Trimestre? @relation(fields: [trimestreId], references: [id], onDelete: SetNull)
 
   pagos Pago[]
 
   @@index([gestionId])
   @@index([activo])
+  @@index([trimestreId])
 }
 
 model Pago {

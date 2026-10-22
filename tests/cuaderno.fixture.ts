@@ -72,7 +72,8 @@ export function datosEjemplo(): DatosCuaderno {
   })
 
   return {
-    institucion: { nombre: 'LITORAL DE CULTA', rue: '81110010', municipio: 'TOTORA', departamento: 'ORURO' },
+    institucion: { nombre: 'LITORAL DE CULTA', rue: '81110010', municipio: 'TOTORA', distrito: 'TOTORA', departamento: 'ORURO' },
+    director: 'ROBERTO VARGAS MAMANI',
     gestion: { anio: 2026, notaMinimaAprobacion: 51 },
     curso: { nivel: 'PRIMARIO', grado: 'TERCERO', paralelo: 'A', turno: 'MAÑANA' },
     docentePrincipal: 'Flavio Cuiza Mamani',

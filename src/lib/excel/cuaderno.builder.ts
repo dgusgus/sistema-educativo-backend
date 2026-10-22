@@ -127,7 +127,7 @@ function hojaCaratula(libro: ExcelJS.Workbook, d: DatosCuaderno, nombre: string)
     h.getRow(fila + 1).height = 24
   }
 
-  bloque(8,  'DISTRITO / MUNICIPIO', d.institucion.municipio)
+  bloque(8,  'DISTRITO / MUNICIPIO', d.institucion.distrito || d.institucion.municipio)
   bloque(10, 'UNIDAD EDUCATIVA', d.institucion.nombre)
   bloque(12, 'CÓDIGO SIE', d.institucion.rue)
   bloque(14, 'NIVEL', d.curso.nivel)
@@ -829,7 +829,7 @@ function hojaLibretas(
     fusionar(h, ff, colAnual - 1, ff, ULT)
     poner(h, ff, colAnual - 1, '______________________________', { alineacion: 'center' })
     fusionar(h, ff + 1, colAnual - 1, ff + 1, ULT)
-    poner(h, ff + 1, colAnual - 1, 'DIRECTOR(A)', { negrita: true, color: COLOR.grisMedio })
+    poner(h, ff + 1, colAnual - 1, d.director ? `DIRECTOR(A): ${d.director}` : 'DIRECTOR(A)', { negrita: true, color: COLOR.grisMedio })
 
     // Salto de página: la siguiente libreta empieza en hoja nueva
     if (idx < d.estudiantes.length - 1) h.getRow(f + filasPorBloque - 1).addPageBreak()

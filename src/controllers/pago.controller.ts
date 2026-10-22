@@ -42,13 +42,15 @@ export const getConceptosPago = async (req: Request, res: Response): Promise<voi
 
 // ─── POST /api/conceptos-pago ─────────────────────────────────────────────────
 export const createConceptoPago = async (req: Request, res: Response): Promise<void> => {
-  const { nombre, descripcion, monto, obligatorio, gestionId, fechaVencimiento } = req.body as {
+  const { nombre, descripcion, monto, obligatorio, gestionId, fechaVencimiento, periodicidad, trimestreId } = req.body as {
     nombre?: string
     descripcion?: string
     monto?: number
     obligatorio?: boolean
     gestionId?: number
     fechaVencimiento?: string
+    periodicidad?: 'UNICO' | 'MENSUAL' | 'TRIMESTRAL'
+    trimestreId?: number
   }
 
   if (!nombre || monto === undefined || !gestionId) {
@@ -63,6 +65,8 @@ export const createConceptoPago = async (req: Request, res: Response): Promise<v
         obligatorio: obligatorio ?? true,
         gestionId,
         fechaVencimiento: fechaVencimiento ? new Date(fechaVencimiento) : undefined,
+        periodicidad: periodicidad ?? 'UNICO',
+        trimestreId,
       },
     })
     res.status(201).json(concepto)
@@ -91,7 +95,11 @@ export const getPagosByInscripcion = async (req: Request, res: Response): Promis
       return
     }
 
-    const conceptos = await prisma.conceptoPago.findMany({ where: { gestionId: inscripcion.gestionId } })
+    // Solo conceptos activos (uno desactivado deja de cobrarse), en orden de vencimiento: la pensión sale cronológica
+    const conceptos = await prisma.conceptoPago.findMany({
+      where: { gestionId: inscripcion.gestionId, activo: true },
+      orderBy: [{ fechaVencimiento: 'asc' }, { id: 'asc' }],
+    })
 
     const pagos = await prisma.pago.findMany({
       where: { inscripcionId },

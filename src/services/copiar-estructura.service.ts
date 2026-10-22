@@ -216,10 +216,17 @@ export async function copiarEstructura(
 
   // ── Conceptos de pago ───────────────────────────────────────────────────────
   if (op.conceptosPago) {
-    const [delOrigen, delDestino] = await Promise.all([
+    const [delOrigen, delDestino, trimOrigen, trimDestino] = await Promise.all([
       db.conceptoPago.findMany({ where: { gestionId: origen.id, activo: true } }),
       db.conceptoPago.findMany({ where: { gestionId: destino.id }, select: { nombre: true } }),
+      db.trimestre.findMany({ where: { gestionId: origen.id }, select: { id: true, numero: true } }),
+      db.trimestre.findMany({ where: { gestionId: destino.id }, select: { id: true, numero: true } }),
     ])
+    // El trimestre de una cuota se traslada al de MISMO NÚMERO de la gestión nueva (si ya existe)
+    const trimestreEquivalente = (id: number | null) => {
+      const num = trimOrigen.find(t => t.id === id)?.numero
+      return trimDestino.find(t => t.numero === num)?.id ?? null
+    }
     // ConceptoPago no tiene restricción única: se evita duplicar por nombre.
     const existentes = new Set(delDestino.map(c => c.nombre.trim().toLowerCase()))
     const aCrear: Prisma.ConceptoPagoCreateManyInput[] = []
@@ -229,6 +236,7 @@ export async function copiarEstructura(
         gestionId: destino.id, nombre: c.nombre, descripcion: c.descripcion, monto: c.monto,
         obligatorio: c.obligatorio, aplicarMora: c.aplicarMora, porcentajeMora: c.porcentajeMora,
         fechaVencimiento: c.fechaVencimiento ? desplazarAnios(c.fechaVencimiento, difAnios) : null,
+        periodicidad: c.periodicidad, trimestreId: trimestreEquivalente(c.trimestreId),
       })
     }
     if (aCrear.length) r.conceptosPago.copiados = (await db.conceptoPago.createMany({ data: aCrear })).count

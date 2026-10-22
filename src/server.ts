@@ -2,10 +2,14 @@ import app from './app.js'
 import { config } from './lib/config.js'
 import { logger } from './lib/logger.js'
 import { prisma } from './lib/prisma.js'
+import { refrescarInstitucion } from './lib/institucion.helper.js'
 
 const server = app.listen(config.port, () => {
   logger.info({ puerto: config.port, ambiente: config.nodeEnv }, 'Servidor iniciado')
 })
+
+// Datos del colegio para los encabezados de PDF (si la BD no responde aún, se reintenta solo).
+refrescarInstitucion().catch(err => logger.warn({ err }, 'No se pudieron precargar los datos de la institución'))
 
 // ─── Apagado ordenado ────────────────────────────────────────────────────────
 // ¿Para qué? Cuando el hosting reinicia o despliega, envía SIGTERM. Sin esto el

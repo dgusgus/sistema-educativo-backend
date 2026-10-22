@@ -120,8 +120,11 @@ export interface DatosCuaderno {
     nombre: string
     rue: string
     municipio: string
+    distrito: string
     departamento: string
   }
+  /** Director(a) de la gestión; vacío si la gestión no tiene uno asignado */
+  director: string
   gestion: { anio: number; notaMinimaAprobacion: number }
   curso: {
     nivel: string
@@ -179,7 +182,7 @@ export async function obtenerDatosCuaderno(
     where: { id: cursoId },
     select: {
       id: true, nivel: true, grado: true, paralelo: true, turno: true, gestionId: true,
-      gestion: { select: { anio: true, notaMinimaAprobacion: true } },
+      gestion: { select: { anio: true, notaMinimaAprobacion: true, director: { select: { persona: { select: { nombre: true, apellido: true } } } } } },
       tutorDocente: { select: { persona: { select: { nombre: true, apellido: true } } } },
     },
   })
@@ -195,7 +198,7 @@ export async function obtenerDatosCuaderno(
   }
 
   const [institucion, trimestresGestion, dimensionesGestion, asignaciones, inscripciones] = await Promise.all([
-    prisma.institucion.findFirst({ select: { nombre: true, rue: true, municipio: true, departamento: true } }),
+    prisma.institucion.findFirst({ select: { nombre: true, rue: true, municipio: true, distrito: true, departamento: true } }),
     prisma.trimestre.findMany({
       where: { gestionId: curso.gestionId }, orderBy: { numero: 'asc' }, select: { id: true, numero: true, nombre: true },
     }),
@@ -462,8 +465,10 @@ export async function obtenerDatosCuaderno(
       nombre: mayus(institucion?.nombre),
       rue: institucion?.rue ?? '',
       municipio: mayus(institucion?.municipio),
+      distrito: mayus(institucion?.distrito),
       departamento: mayus(institucion?.departamento),
     },
+    director: curso.gestion.director ? mayus(`${curso.gestion.director.persona.nombre} ${curso.gestion.director.persona.apellido}`) : '',
     gestion: { anio: curso.gestion.anio, notaMinimaAprobacion: Number(curso.gestion.notaMinimaAprobacion) },
     curso: {
       nivel: nivelEnTexto(curso.nivel),

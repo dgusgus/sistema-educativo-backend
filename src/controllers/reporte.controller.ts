@@ -1,5 +1,6 @@
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { contarMorosos } from '../services/cobranza.service.js'
 import { crearDocumento, dibujarEncabezado, dibujarPiePagina, COLORES } from '../lib/pdf.js'
 import { aplanarPersona } from '../lib/persona.helper.js'
 import { NIVEL_TEXTO } from '../lib/curso.helper.js'
@@ -49,17 +50,9 @@ export const getDashboard = async (_req: Request, res: Response): Promise<void> 
       _sum: { montoPagado: true },
     })
 
-    // "Pagos pendientes" = deudas (inscripción + concepto) con saldo: un pago parcial o una
-    // deuda registrada sin pagar. Se calcula por saldo, no por la etiqueta de cada fila.
-    const [{ n: pendientes }] = await prisma.$queryRaw<Array<{ n: bigint }>>`
-      SELECT count(*) AS n FROM (
-        SELECT p."inscripcionId", p."conceptoPagoId"
-        FROM "Pago" p JOIN "Inscripcion" i ON i.id = p."inscripcionId"
-        WHERE i."gestionId" = ${gestion.id} AND p.estado <> 'ANULADO'
-        GROUP BY p."inscripcionId", p."conceptoPagoId"
-        HAVING max(p."montoOriginal") - sum(p.descuento) - sum(p."montoPagado") > 0
-      ) deudas`
-    const pagosPendientes = Number(pendientes)
+    // "Pagos pendientes" = estudiantes con deuda VENCIDA (concepto obligatorio, pasada su fecha).
+    // Antes se contaban filas de Pago: quien nunca pagó nada no tenía filas y no figuraba como deudor.
+    const pagosPendientes = await contarMorosos(gestion.id)
 
     const trimestres = await prisma.trimestre.findMany({
       where: { gestionId: gestion.id },
