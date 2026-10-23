@@ -81,7 +81,9 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 // (el que importa contra fuerza bruta de contraseñas) vive en auth.controller.ts.
 app.use('/api', rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 300,
+  // Por IP. Un colegio entero suele salir por una sola IP (wifi/NAT): si hay mucha concurrencia
+  // (o una prueba de carga) súbelo con RATE_LIMIT_API en el .env.
+  limit: Number(process.env.RATE_LIMIT_API) || 300,
   standardHeaders: true,
   legacyHeaders: false,
 }))
@@ -91,7 +93,10 @@ app.use('/api', rateLimit({
 // curso entero quedaría bloqueado a la persona número 16.
 app.use('/api/auth/login', rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 15,
+  // OJO: express-rate-limit cuenta cada intento al entrar y devuelve el contador solo cuando el login
+  // resulta correcto, así que 15 inicios de sesión SIMULTÁNEOS (un aula entera) ya disparan el 429.
+  // El bloqueo real contra fuerza bruta es por cuenta (auth.controller). Ajustable con RATE_LIMIT_LOGIN.
+  limit: Number(process.env.RATE_LIMIT_LOGIN) || 15,
   skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
