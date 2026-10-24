@@ -26,6 +26,7 @@ import evaluacionRoutes   from './routes/evaluacion.routes.js'
 import actividadRoutes    from './routes/actividad.routes.js'
 import pagoRoutes         from './routes/pago.routes.js'
 import boletinRoutes      from './routes/boletin.routes.js'
+import historialRoutes from './routes/historial.routes.js'
 import reporteRoutes      from './routes/reporte.routes.js'
 import directorRoutes     from './routes/director.routes.js'
 import secretariaRoutes   from './routes/secretaria.routes.js'
@@ -152,6 +153,7 @@ app.use('/api/calificaciones', calificacionRoutes)
 app.use('/api/actividades',    actividadRoutes)
 app.use('/api/pagos',          pagoRoutes)
 app.use('/api/boletin',        boletinRoutes)
+app.use('/api/historial',      historialRoutes)
 app.use('/api/institucion',    institucionRoutes)
 app.use('/api/horarios',       horarioRoutes)
 app.use('/api/cuaderno',       cuadernoRoutes)
