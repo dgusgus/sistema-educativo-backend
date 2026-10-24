@@ -4,6 +4,8 @@ import { aplanarPersona } from '../lib/persona.helper.js'
 import { NIVEL_TEXTO } from '../lib/curso.helper.js'
 import { Prisma } from '../../prisma/generated/prisma/client.js'
 import { aCentavos, calcularDeuda, recalcularEstadosDeuda } from '../lib/pago.helper.js'
+import { obtenerDatosRecibo, generarReciboPdf } from '../services/recibo.service.js'
+import { ErrorDeUsuario } from '../lib/errores.js'
 
 const METODOS_PAGO = ['EFECTIVO', 'TRANSFERENCIA', 'QR'] as const
 type MetodoPagoValido = typeof METODOS_PAGO[number]
@@ -378,6 +380,27 @@ export const anularPago = async (req: Request, res: Response): Promise<void> => 
     res.status(200).json({ message: 'Pago anulado correctamente', pago: anulado })
   } catch (error) {
     console.error('[pago.anularPago]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+// ─── GET /api/pagos/:id/recibo ────────────────────────────────────────────────
+// Recibo en PDF (original + copia en una hoja A4). Se puede reimprimir cuantas veces se quiera;
+// un pago anulado sale con la marca ANULADO. ?inline=1 lo abre en el navegador en vez de descargarlo.
+export const getReciboPago = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  try {
+    const datos = await obtenerDatosRecibo(id)
+    const doc = generarReciboPdf(datos)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `${req.query.inline ? 'inline' : 'attachment'}; filename="${datos.numero}.pdf"`)
+    doc.pipe(res)
+    doc.end()
+  } catch (error) {
+    if (error instanceof ErrorDeUsuario) {
+      res.status(error.status ?? 400).json({ error: error.message })
+      return
+    }
+    console.error('[pago.getReciboPago]', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }

@@ -5,6 +5,7 @@ import {
   getPagosByInscripcion,
   registrarPago,
   anularPago,
+  getReciboPago,
 } from '../controllers/pago.controller.js'
 import {
   getCobranza, getPagosRecibidos, descargarCobranzaExcel, actualizarConcepto, generarConceptos,
@@ -62,6 +63,7 @@ router.post(
   requireRol('SECRETARIA', 'DIRECTOR'),
   registrarPago
 )
+router.get('/:id/recibo', requireRol('SECRETARIA', 'DIRECTOR'), getReciboPago)
 router.put(
   '/:id/anular',
   requireRol('SECRETARIA', 'DIRECTOR'),
