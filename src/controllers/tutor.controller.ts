@@ -13,7 +13,8 @@ const PARENTESCOS_VALIDOS = ['PADRE', 'MADRE', 'ABUELO', 'ABUELA', 'TIO', 'TIA',
 type ParentescoValido = typeof PARENTESCOS_VALIDOS[number]
 
 function normalizarParentesco(valor: string): ParentescoValido {
-  const limpio = valor.trim().toUpperCase().replace(/\s+/g, '_')
+  // "Tío" → TIO, "tutor legal" → TUTOR_LEGAL: sin tildes, en mayúsculas y con guion bajo
+  const limpio = valor.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase().replace(/\s+/g, '_')
   if (!PARENTESCOS_VALIDOS.includes(limpio as ParentescoValido)) {
     throw new ErrorDeUsuario(`Parentesco "${valor}" inválido — debe ser uno de: ${PARENTESCOS_VALIDOS.join(', ')}`)
   }
@@ -270,6 +271,14 @@ export const vincularEstudiante = async (req: Request, res: Response): Promise<v
     res.status(400).json({ error: 'parentesco es obligatorio' })
     return
   }
+  // Antes el texto libre ("Padre") llegaba tal cual a Prisma y respondía 500: ahora se normaliza o se rechaza con 400
+  let parentescoNorm: ParentescoValido
+  try {
+    parentescoNorm = normalizarParentesco(parentesco)
+  } catch (e) {
+    res.status(400).json({ error: e instanceof ErrorDeUsuario ? e.message : 'Parentesco inválido' })
+    return
+  }
 
   try {
     const existe = await prisma.tutorEstudiante.findUnique({
@@ -282,7 +291,7 @@ export const vincularEstudiante = async (req: Request, res: Response): Promise<v
 
     const vinculo = await prisma.tutorEstudiante.create({
       data: {
-        tutorId, estudianteId, parentesco: parentesco as any,
+        tutorId, estudianteId, parentesco: parentescoNorm,
         esTutorPrincipal:  esTutorPrincipal  ?? false,
         esApoderado:       esApoderado       ?? false,
         viveConEstudiante: viveConEstudiante ?? true,
