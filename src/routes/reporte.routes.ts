@@ -3,6 +3,7 @@ import {
   getDashboard,
   getReporteAcademico,
   getReporteAcademicoPDF,
+  getReporteComparativo,
 } from '../controllers/reporte.controller.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
 
@@ -14,6 +15,9 @@ router.get(
   requireRol('DIRECTOR'),
   getDashboard
 )
+
+// Comparativo entre gestiones
+router.get('/reportes/comparativo', requireRol('DIRECTOR', 'SECRETARIA'), getReporteComparativo)
 
 // Reporte académico JSON
 router.get(

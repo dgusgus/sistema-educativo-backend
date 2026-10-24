@@ -285,3 +285,83 @@ export const getReporteAcademicoPDF = async (req: Request, res: Response): Promi
     }
   }
 }
+// ─── GET /api/reportes/comparativo ───────────────────────────────────────────
+// Rendimiento comparado entre gestiones: por gestión (inscritos, aprobación,
+// promedios, asistencia), por grado y por materia. Sirve para ver tendencias
+// ("¿mejoró Matemática de 2024 a 2025?") y no solo la gestión activa.
+// Query opcional: ?desde=2023&hasta=2026
+export const getReporteComparativo = async (req: Request, res: Response): Promise<void> => {
+  const desde = Number(req.query.desde) || 0
+  const hasta = Number(req.query.hasta) || 9999
+  const num = (x: unknown) => (x === null || x === undefined ? null : Math.round(Number(x) * 100) / 100)
+
+  try {
+    const [porGestion, promTrim, asistencia, porGrado, porMateria] = await Promise.all([
+      prisma.$queryRaw<any[]>`
+        SELECT g.id AS "gestionId", g.anio,
+               COUNT(i.id)::int AS inscritos,
+               COUNT(*) FILTER (WHERE i."estadoInscripcion" = 'RETIRADA')::int AS retirados,
+               COUNT(*) FILTER (WHERE i.resultado = 'PROMOVIDO')::int AS promovidos,
+               COUNT(*) FILTER (WHERE i.resultado = 'REPROBADO')::int AS reprobados,
+               COUNT(*) FILTER (WHERE i.resultado = 'PENDIENTE' AND i."estadoInscripcion" <> 'RETIRADA')::int AS pendientes,
+               (SELECT AVG(pf."promedioFinal") FROM "PromedioFinal" pf JOIN "Inscripcion" i2 ON i2.id = pf."inscripcionId" WHERE i2."gestionId" = g.id) AS "promedioGeneral"
+        FROM "Gestion" g LEFT JOIN "Inscripcion" i ON i."gestionId" = g.id
+        WHERE g.anio BETWEEN ${desde} AND ${hasta}
+        GROUP BY g.id, g.anio HAVING COUNT(i.id) > 0 ORDER BY g.anio`,
+      prisma.$queryRaw<any[]>`
+        SELECT i."gestionId", t.numero, AVG(c."promedioTrimestral") AS promedio
+        FROM "Calificacion" c JOIN "Inscripcion" i ON i.id = c."inscripcionId"
+        JOIN "Trimestre" t ON t.id = c."trimestreId" JOIN "Gestion" g ON g.id = i."gestionId"
+        WHERE c."promedioTrimestral" IS NOT NULL AND g.anio BETWEEN ${desde} AND ${hasta}
+        GROUP BY i."gestionId", t.numero`,
+      prisma.$queryRaw<any[]>`
+        SELECT i."gestionId", SUM(r."totalPresente" + r."totalRetraso" + r."totalJustificado")::float AS ok, SUM(r."totalClases")::float AS clases
+        FROM "ResumenAsistencia" r JOIN "Inscripcion" i ON i.id = r."inscripcionId" JOIN "Gestion" g ON g.id = i."gestionId"
+        WHERE g.anio BETWEEN ${desde} AND ${hasta} GROUP BY i."gestionId"`,
+      prisma.$queryRaw<any[]>`
+        SELECT g.anio, cu.nivel::text AS nivel, cu.grado,
+               COUNT(DISTINCT i.id)::int AS estudiantes,
+               COUNT(DISTINCT i.id) FILTER (WHERE i.resultado = 'PROMOVIDO')::int AS promovidos,
+               COUNT(DISTINCT i.id) FILTER (WHERE i.resultado = 'REPROBADO')::int AS reprobados,
+               AVG(pf."promedioFinal") AS promedio
+        FROM "Inscripcion" i JOIN "Gestion" g ON g.id = i."gestionId"
+        JOIN "Curso" cu ON cu.id = i."cursoId" AND cu."gestionId" = i."gestionId"
+        LEFT JOIN "PromedioFinal" pf ON pf."inscripcionId" = i.id
+        WHERE g.anio BETWEEN ${desde} AND ${hasta}
+        GROUP BY g.anio, cu.nivel, cu.grado ORDER BY g.anio, cu.nivel, cu.grado`,
+      prisma.$queryRaw<any[]>`
+        SELECT g.anio, m.nombre AS materia, AVG(pf."promedioFinal") AS promedio,
+               COUNT(*) FILTER (WHERE pf.resultado = 'REPROBADO')::int AS reprobados, COUNT(*)::int AS total
+        FROM "PromedioFinal" pf JOIN "Inscripcion" i ON i.id = pf."inscripcionId"
+        JOIN "Gestion" g ON g.id = i."gestionId"
+        JOIN "DocenteMateriaCurso" d ON d.id = pf."docenteMateriaCursoId" JOIN "Materia" m ON m.id = d."materiaId"
+        WHERE g.anio BETWEEN ${desde} AND ${hasta}
+        GROUP BY g.anio, m.nombre ORDER BY m.nombre, g.anio`,
+    ])
+
+    const gestiones = porGestion.map(g => {
+      const trims: Record<number, number | null> = {}
+      promTrim.filter(t => t.gestionId === g.gestionId).forEach(t => { trims[t.numero] = num(t.promedio) })
+      const a = asistencia.find(x => x.gestionId === g.gestionId)
+      const evaluados = g.promovidos + g.reprobados
+      return {
+        gestionId: g.gestionId, anio: g.anio,
+        inscritos: g.inscritos, retirados: g.retirados,
+        promovidos: g.promovidos, reprobados: g.reprobados, pendientes: g.pendientes,
+        tasaAprobacion: evaluados ? Math.round((g.promovidos / evaluados) * 1000) / 10 : null,
+        promedioGeneral: num(g.promedioGeneral),
+        promedioPorTrimestre: trims,
+        asistencia: a && a.clases ? Math.round((a.ok / a.clases) * 1000) / 10 : null,
+      }
+    })
+
+    res.status(200).json({
+      gestiones,
+      porGrado: porGrado.map(r => ({ ...r, promedio: num(r.promedio) })),
+      porMateria: porMateria.map(r => ({ ...r, promedio: num(r.promedio) })),
+    })
+  } catch (error) {
+    console.error('[reporte.getReporteComparativo]', error)
+    res.status(500).json({ error: 'Error al generar el comparativo' })
+  }
+}
