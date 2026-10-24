@@ -9,6 +9,7 @@
 //   promocion   fin de año con un caso de cada rama           (Paso 1 y Paso 2 de Promoción)
 //   volumen     ~900 estudiantes                              (paginación, búsqueda, rendimiento)
 //   carga       900 INSCRITOS en 24 cursos A-D, horarios, notas, asistencia, pagos (prueba de carga)
+//   historico   carga + 2 gestiones anteriores CERRADAS con continuidad de estudiantes (Historial y Comparativo)
 //   importacion 24 cursos A-D sin personas: para probar los Excel de generar-excel.ts
 //   defensa     el seed de siempre (T3 al ~85 %)              → prisma/seed.ts
 //   cierre      T3 al 100 %, listo para cerrar la gestión     → prisma/seed.ts con SEED_T3_COMPLETO=si
@@ -25,9 +26,10 @@ import { estructura } from './estructura.js'
 import { promocion } from './promocion.js'
 import { volumen } from './volumen.js'
 import { carga } from './carga.js'
+import { historico } from './historico.js'
 import { importacion } from './importacion.js'
 
-const PERFILES: Record<string, Perfil> = { vacio, estructura, promocion, volumen, carga, importacion }
+const PERFILES: Record<string, Perfil> = { vacio, estructura, promocion, volumen, carga, historico, importacion }
 const DELEGADOS: Record<string, { descripcion: string; env: Record<string, string> }> = {
   defensa: { descripcion: 'El seed de siempre (prisma/seed.ts), T3 al ~85 %.', env: {} },
   cierre:  { descripcion: 'prisma/seed.ts con T3 al 100 %: listo para cerrar la gestión.', env: { SEED_T3_COMPLETO: 'si' } },
