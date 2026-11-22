@@ -516,3 +516,204 @@ export const createUsuarioConPerfil = async (req: Request, res: Response): Promi
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
+// ─── Roles de personal que se pueden sumar/quitar a una misma persona ────────
+const ROLES_PERSONAL = ['DIRECTOR', 'SECRETARIA', 'DOCENTE'] as const
+type RolPersonal = typeof ROLES_PERSONAL[number]
+const esRolPersonal = (r: unknown): r is RolPersonal => ROLES_PERSONAL.includes(r as RolPersonal)
+const claveDePerfil = { DIRECTOR: 'director', SECRETARIA: 'secretaria', DOCENTE: 'docente' } as const
+
+class Rechazo extends Error {
+  constructor(public status: number, message: string) { super(message) }
+}
+
+// ─── POST /api/usuarios/habilitar-rol ────────────────────────────────────────
+// Suma un rol de personal (DIRECTOR / SECRETARIA / DOCENTE) a una persona que
+// YA existe, sin volver a crear sus datos: reutiliza la misma Persona, crea (o
+// reactiva) el perfil y agrega el rol a su cuenta. Sirve para "un Director que
+// también es Docente" y viceversa.
+//
+// Body: { usuarioId? | personaId?, rol, especialidad?, gestionId?, username?, password? }
+//   • Si la persona ya tiene cuenta (en cualquiera de sus perfiles) se reutiliza.
+//   • Si no tiene cuenta (p. ej. un Docente sin acceso que pasa a Director) hay
+//     que enviar username y password para crearla.
+export const habilitarRol = async (req: Request, res: Response): Promise<void> => {
+  const { usuarioId, personaId, rol, especialidad, gestionId, username, password } = req.body as {
+    usuarioId?: number; personaId?: number; rol?: Rol
+    especialidad?: string; gestionId?: number; username?: string; password?: string
+  }
+
+  if (!esRolPersonal(rol)) {
+    res.status(400).json({ error: `rol debe ser uno de: ${ROLES_PERSONAL.join(', ')}` })
+    return
+  }
+  if (!usuarioId && !personaId) {
+    res.status(400).json({ error: 'Debes enviar usuarioId o personaId' })
+    return
+  }
+
+  try {
+    const resultado = await prisma.$transaction(async tx => {
+      // 1. Resolver la persona
+      const incluirPerfiles = { director: true, secretaria: true, docente: true } as const
+      let persona: any = null
+      if (personaId) {
+        persona = await tx.persona.findUnique({ where: { id: personaId }, include: incluirPerfiles })
+      } else {
+        const u = await tx.usuario.findUnique({
+          where: { id: usuarioId! },
+          include: { director: true, secretaria: true, docente: true, estudiante: true, tutor: true },
+        })
+        if (!u) throw new Rechazo(404, 'Usuario no encontrado')
+        const pid = (u.director ?? u.secretaria ?? u.docente ?? u.estudiante ?? u.tutor)?.personaId
+        if (!pid) throw new Rechazo(400, 'La cuenta no tiene una persona vinculada')
+        persona = await tx.persona.findUnique({ where: { id: pid }, include: incluirPerfiles })
+      }
+      if (!persona) throw new Rechazo(404, 'Persona no encontrada')
+
+      // 2. Resolver la cuenta (reutilizar la que ya tenga; si no, crearla)
+      let cuentaId: number | null =
+        usuarioId ?? persona.director?.usuarioId ?? persona.secretaria?.usuarioId ?? persona.docente?.usuarioId ?? null
+      let credenciales: { username: string; password: string } | null = null
+
+      if (!cuentaId) {
+        if (!username || !password) {
+          throw new Rechazo(400, `${persona.nombre} ${persona.apellido} no tiene cuenta de acceso: envía username y password para crearla`)
+        }
+        if (password.length < 6) throw new Rechazo(400, 'La contraseña debe tener al menos 6 caracteres')
+        if (await tx.usuario.findUnique({ where: { username } })) {
+          throw new Rechazo(409, `El username "${username}" ya está en uso`)
+        }
+        const nuevo = await tx.usuario.create({
+          data: { username, passwordHash: await bcrypt.hash(password, 12), roles: [rol], activo: true },
+        })
+        cuentaId    = nuevo.id
+        credenciales = { username, password }
+
+        // Si la persona ya era Docente sin cuenta, esa cuenta nueva también es la suya:
+        // se liga el perfil docente y se suma el rol (un solo login para todo).
+        if (persona.docente && !persona.docente.usuarioId && rol !== 'DOCENTE') {
+          await tx.docente.update({ where: { id: persona.docente.id }, data: { usuarioId: nuevo.id } })
+          await tx.usuario.update({ where: { id: nuevo.id }, data: { roles: [rol, 'DOCENTE'] } })
+          persona.docente.usuarioId = nuevo.id
+        }
+      }
+
+      const cuenta = await tx.usuario.findUniqueOrThrow({ where: { id: cuentaId } })
+
+      // 3. Crear / reactivar el perfil
+      const clave  = claveDePerfil[rol]
+      const actual = persona[clave] as { id: number; activo: boolean; usuarioId: number | null } | null
+
+      if (actual && actual.usuarioId && actual.usuarioId !== cuenta.id) {
+        throw new Rechazo(409, `El perfil de ${rol.toLowerCase()} de esta persona está ligado a otra cuenta`)
+      }
+      if (actual && actual.activo && cuenta.roles.includes(rol) && actual.usuarioId === cuenta.id) {
+        throw new Rechazo(409, `Esta persona ya es ${rol.toLowerCase()} y tiene el rol habilitado`)
+      }
+
+      if (rol === 'DIRECTOR' && gestionId) {
+        const g = await tx.gestion.findUnique({ where: { id: gestionId }, select: { directorId: true } })
+        if (!g) throw new Rechazo(404, 'La gestión indicada no existe')
+        if (g.directorId && g.directorId !== actual?.id) throw new Rechazo(409, 'Esa gestión ya tiene un director asignado')
+      }
+
+      let perfil: any
+      if (actual) {
+        perfil = await (tx as any)[clave].update({
+          where: { id: actual.id },
+          data:  { activo: true, usuarioId: cuenta.id, ...(rol === 'DOCENTE' && especialidad ? { especialidad } : {}) },
+        })
+      } else {
+        perfil = await (tx as any)[clave].create({
+          data: { personaId: persona.id, usuarioId: cuenta.id, ...(rol === 'DOCENTE' ? { especialidad } : {}) },
+        })
+      }
+      if (rol === 'DIRECTOR' && gestionId) {
+        await tx.gestion.update({ where: { id: gestionId }, data: { directorId: perfil.id } })
+      }
+
+      // 4. Agregar el rol a la cuenta (y reactivarla si estaba inactiva por este perfil)
+      const roles = cuenta.roles.includes(rol) ? cuenta.roles : [...cuenta.roles, rol]
+      const usuario = await tx.usuario.update({
+        where:  { id: cuenta.id },
+        data:   { roles },
+        select: { id: true, username: true, roles: true, activo: true },
+      })
+
+      return { usuario, perfil, credenciales, persona: { id: persona.id, nombre: persona.nombre, apellido: persona.apellido, ci: persona.ci } }
+    })
+
+    res.status(201).json({
+      ...resultado,
+      mensaje: `${resultado.persona.nombre} ${resultado.persona.apellido} ahora también es ${rol.toLowerCase()}. ` +
+               'Para ver el nuevo rol debe volver a iniciar sesión.',
+    })
+  } catch (error) {
+    if (error instanceof Rechazo) {
+      res.status(error.status).json({ error: error.message })
+      return
+    }
+    console.error('[usuario.habilitarRol]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// ─── POST /api/usuarios/:id/quitar-rol ───────────────────────────────────────
+// Quita un rol de personal a la cuenta y desactiva ese perfil (no se borra:
+// se conserva el historial). La cuenta debe quedar con al menos otro rol.
+export const quitarRol = async (req: Request, res: Response): Promise<void> => {
+  const id  = Number(req.params.id)
+  const { rol } = req.body as { rol?: Rol }
+
+  if (!esRolPersonal(rol)) {
+    res.status(400).json({ error: `rol debe ser uno de: ${ROLES_PERSONAL.join(', ')}` })
+    return
+  }
+  if (req.user?.id === id) {
+    res.status(400).json({ error: 'No puedes quitarte un rol a ti mismo; pídelo a otro Director' })
+    return
+  }
+
+  try {
+    await prisma.$transaction(async tx => {
+      const u = await tx.usuario.findUnique({
+        where: { id },
+        include: { director: true, secretaria: true, docente: true },
+      })
+      if (!u) throw new Rechazo(404, 'Usuario no encontrado')
+      if (!u.roles.includes(rol)) throw new Rechazo(400, `La cuenta no tiene el rol ${rol}`)
+      if (u.roles.length === 1) {
+        throw new Rechazo(400, 'Es el único rol de la cuenta. Para quitar el acceso desactiva la cuenta.')
+      }
+
+      if (rol === 'DIRECTOR') {
+        const otros = await tx.usuario.count({ where: { roles: { has: 'DIRECTOR' }, activo: true, id: { not: id } } })
+        if (otros < 1) throw new Rechazo(400, 'No se puede quitar el rol al único Director activo del sistema')
+        if (u.director) {
+          const g = await tx.gestion.count({ where: { directorId: u.director.id, activa: true } })
+          if (g > 0) throw new Rechazo(409, 'Es el director de la gestión activa: asigna otro director a la gestión primero')
+        }
+      }
+      if (rol === 'DOCENTE' && u.docente) {
+        const asig = await tx.docenteMateriaCurso.count({ where: { docenteId: u.docente.id, gestion: { activa: true } } })
+        if (asig > 0) throw new Rechazo(409, `Tiene ${asig} materia(s) asignada(s) en la gestión activa: reasígnalas primero`)
+        const tut = await tx.curso.count({ where: { tutorDocenteId: u.docente.id, gestion: { activa: true } } })
+        if (tut > 0) throw new Rechazo(409, `Es tutor de ${tut} curso(s) en la gestión activa: cambia el tutor primero`)
+      }
+
+      const clave = claveDePerfil[rol]
+      const perfil = (u as any)[clave]
+      if (perfil) await (tx as any)[clave].update({ where: { id: perfil.id }, data: { activo: false } })
+      await tx.usuario.update({ where: { id }, data: { roles: u.roles.filter(r => r !== rol) } })
+    })
+
+    res.status(200).json({ message: `Rol ${rol} retirado. Los datos históricos se conservan.` })
+  } catch (error) {
+    if (error instanceof Rechazo) {
+      res.status(error.status).json({ error: error.message })
+      return
+    }
+    console.error('[usuario.quitarRol]', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}

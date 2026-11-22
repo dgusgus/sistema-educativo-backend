@@ -32,7 +32,7 @@ export const getDocentes = async (req: Request, res: Response): Promise<void> =>
       },
       include: {
         persona: true,
-        usuario: { select: { id: true, username: true, activo: true } },
+        usuario: { select: { id: true, username: true, roles: true, activo: true } },
         asignaciones: {
           where: { gestion: { activa: true } },
           include: {

@@ -8,6 +8,8 @@ import {
   deleteUsuario,
   vincularPerfil,
   createUsuarioConPerfil,
+  habilitarRol,
+  quitarRol,
 } from '../controllers/usuario.controller.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
 import { paramEntero } from '../middlewares/validate.middleware.js'
@@ -29,6 +31,10 @@ router.post(
   requireRol('DIRECTOR', 'SECRETARIA'),
   createUsuarioConPerfil
 )
+
+// Sumar un rol (Director/Secretaria/Docente) a una persona existente — antes de /:id
+router.post('/habilitar-rol', requireRol('DIRECTOR'), habilitarRol)
+router.post('/:id/quitar-rol', requireRol('DIRECTOR'), quitarRol)
 
 router.get(
   '/:id',
