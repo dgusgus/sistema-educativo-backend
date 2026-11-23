@@ -8,7 +8,8 @@
 
 import { Request, Response } from 'express'
 import { prisma } from '../lib/prisma.js'
-import { Prohibido } from '../lib/errores.js'
+import { Prohibido, ErrorDeUsuario, NoEncontrado, Conflicto } from '../lib/errores.js'
+import { cambiaElCalculo, motivoBloqueoDimension } from '../lib/dimension.reglas.js'
 import { obtenerActividadParaNotas, registrarNotas, desactivarActividad, type NotaEntrada } from '../services/evaluacion.service.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
@@ -92,7 +93,7 @@ export const createDimension = async (req: Request, res: Response): Promise<void
 // sumen 1.0 — eso lo controla el frontend (con aviso, no bloqueo) para
 // no ser rígidos: puede haber un momento intermedio mientras se ajustan
 // varias dimensiones a la vez.
-export const updateDimension = async (req: Request, res: Response): Promise<void> => {
+export const updateDimension = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const { nombre, puntajeMaximo, pesoEnPromedio, orden, esAutoevaluada } = req.body as {
     nombre?: string
@@ -102,46 +103,46 @@ export const updateDimension = async (req: Request, res: Response): Promise<void
     esAutoevaluada?: boolean
   }
 
+  if (!Number.isInteger(id)) throw new ErrorDeUsuario('ID inválido')
+  if (puntajeMaximo !== undefined && !(puntajeMaximo > 0 && puntajeMaximo <= 999.99)) {
+    throw new ErrorDeUsuario('puntajeMaximo debe ser un número mayor a 0')
+  }
   if (pesoEnPromedio !== undefined && (pesoEnPromedio < 0 || pesoEnPromedio > 9.999)) {
-    res.status(400).json({
-      error: 'pesoEnPromedio debe ser una fracción entre 0 y 9.999 (ej. 0.45 para 45%, no 45)',
-    })
-    return
+    throw new ErrorDeUsuario('pesoEnPromedio debe ser una fracción entre 0 y 9.999 (ej. 0.45 para 45%, no 45)')
   }
 
-  try {
-    const existe = await prisma.dimensionEvaluacion.findUnique({ where: { id } })
-    if (!existe) {
-      res.status(404).json({ error: 'Dimensión no encontrada' })
-      return
-    }
+  const existe = await prisma.dimensionEvaluacion.findUnique({ where: { id } })
+  if (!existe) throw new NoEncontrado('Dimensión')
 
-    if (nombre !== undefined && nombre !== existe.nombre) {
-      const duplicada = await prisma.dimensionEvaluacion.findUnique({
-        where: { gestionId_nombre: { gestionId: existe.gestionId, nombre } },
-      })
-      if (duplicada) {
-        res.status(409).json({ error: `Ya existe la dimensión "${nombre}" en esta gestión` })
-        return
-      }
-    }
-
-    const dimension = await prisma.dimensionEvaluacion.update({
-      where: { id },
-      data: {
-        ...(nombre          !== undefined && { nombre }),
-        ...(puntajeMaximo    !== undefined && { puntajeMaximo }),
-        ...(pesoEnPromedio  !== undefined && { pesoEnPromedio }),
-        ...(orden           !== undefined && { orden }),
-        ...(esAutoevaluada  !== undefined && { esAutoevaluada }),
-      },
+  if (nombre !== undefined && nombre !== existe.nombre) {
+    const duplicada = await prisma.dimensionEvaluacion.findUnique({
+      where: { gestionId_nombre: { gestionId: existe.gestionId, nombre } },
     })
-    res.status(200).json(dimension)
-  } catch (error) {
-    console.error('[evaluacion.updateDimension]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
+    if (duplicada) throw new Conflicto(`Ya existe la dimensión "${nombre}" en esta gestión`)
   }
-}
+
+  // Cambiar el puntaje máximo o el peso con notas ya cargadas (o en un trimestre cerrado)
+  // desfasa los promedios guardados. Nombre, orden y "autoevaluada" no afectan el cálculo.
+  if (cambiaElCalculo(existe, { puntajeMaximo, pesoEnPromedio })) {
+    const usadas = await prisma.actividadEvaluativa.count({
+      where: { dimensionId: id, OR: [{ notas: { some: {} } }, { trimestre: { cerrado: true } }] },
+    })
+    const motivo = motivoBloqueoDimension(usadas)
+    if (motivo) throw new Conflicto(motivo)
+  }
+
+  const dimension = await prisma.dimensionEvaluacion.update({
+    where: { id },
+    data: {
+      ...(nombre          !== undefined && { nombre }),
+      ...(puntajeMaximo    !== undefined && { puntajeMaximo }),
+      ...(pesoEnPromedio  !== undefined && { pesoEnPromedio }),
+      ...(orden           !== undefined && { orden }),
+      ...(esAutoevaluada  !== undefined && { esAutoevaluada }),
+    },
+  })
+  res.status(200).json(dimension)
+})
 
 // ─── DELETE /api/dimensiones/:id ───────────────────────────────────────────────
 // Solo se puede borrar si NO tiene actividades evaluativas asociadas —
