@@ -4,6 +4,8 @@ import { aplanarPersona } from '../lib/persona.helper.js'
 import { validarContextoAcademicoLote } from '../lib/contexto-academico.helper.js'
 
 import { asyncHandler } from '../lib/asyncHandler.js'
+import { ErrorDeUsuario, NoEncontrado, Prohibido } from '../lib/errores.js'
+import { errorFechaAsistencia } from '../lib/asistencia.reglas.js'
 import { actualizarResumenAsistencia, construirAlertasAsistencia } from '../services/asistencia-resumen.service.js'
 import { esDocenteDeAsignacion, esDocenteDelCurso, esFamiliaDeEstudiante, miEstudianteId, estudiantesDeMiTutoria, puedeVerEstudiante } from '../lib/ownership.helper.js'
 
@@ -54,8 +56,8 @@ export const getAsistencia = asyncHandler(async (req: Request, res: Response): P
   })
 
   const fechaDate = new Date(fecha)
-  const inicioDia = new Date(fechaDate); inicioDia.setHours(0, 0, 0, 0)
-  const finDia    = new Date(fechaDate); finDia.setHours(23, 59, 59, 999)
+  const inicioDia = new Date(fechaDate); inicioDia.setUTCHours(0, 0, 0, 0)
+  const finDia    = new Date(fechaDate); finDia.setUTCHours(23, 59, 59, 999)
 
   const asistenciasExistentes = await prisma.asistencia.findMany({
     where: { docenteMateriaCursoId: dmcId, fecha: { gte: inicioDia, lte: finDia } },
@@ -132,8 +134,16 @@ export const registrarAsistencia = asyncHandler(async (req: Request, res: Respon
     return
   }
 
-  const fechaInicio = new Date(fecha); fechaInicio.setHours(0, 0, 0, 0)
-  const fechaFin    = new Date(fecha); fechaFin.setHours(23, 59, 59, 999)
+  // Reglas de negocio: trimestre abierto y fecha dentro de él (ni futura). Antes se podía
+  // alterar la asistencia de un trimestre cerrado o registrar fechas imposibles.
+  const trimestre = await prisma.trimestre.findUnique({ where: { id: trimestreId } })
+  if (!trimestre) throw new NoEncontrado('Trimestre')
+  if (trimestre.cerrado) throw new Prohibido(`El trimestre "${trimestre.nombre}" está cerrado — no se puede registrar asistencia`)
+  const errorFecha = errorFechaAsistencia(fecha, trimestre)
+  if (errorFecha) throw new ErrorDeUsuario(errorFecha)
+
+  const fechaInicio = new Date(fecha); fechaInicio.setUTCHours(0, 0, 0, 0)
+  const fechaFin    = new Date(fecha); fechaFin.setUTCHours(23, 59, 59, 999)
 
   const yaExiste = await prisma.asistencia.findFirst({
     where: { docenteMateriaCursoId, fecha: { gte: fechaInicio, lte: fechaFin } },
@@ -188,7 +198,7 @@ export const actualizarAsistencia = asyncHandler(async (req: Request, res: Respo
 
   const asistencia = await prisma.asistencia.findUnique({
     where: { id },
-    include: { docenteMateriaCurso: true },
+    include: { docenteMateriaCurso: true, trimestre: { select: { nombre: true, cerrado: true } } },
   })
 
   if (!asistencia) {
@@ -199,6 +209,10 @@ export const actualizarAsistencia = asyncHandler(async (req: Request, res: Respo
   if (!await esDocenteDeAsignacion(req, asistencia.docenteMateriaCursoId)) {
     res.status(403).json({ error: 'Solo puedes modificar tus propios registros' })
     return
+  }
+
+  if (asistencia.trimestre.cerrado) {
+    throw new Prohibido(`El trimestre "${asistencia.trimestre.nombre}" está cerrado — no se puede modificar la asistencia`)
   }
 
   const updated = await prisma.asistencia.update({ where: { id }, data: { estado, justificacion } })
