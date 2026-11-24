@@ -4,6 +4,7 @@
 //
 //   pnpm db:seed:perfil <perfil> [--limpiar]
 //
+//   demo        PARA LA DEFENSA: 500 inscritos, 2 gestiones cerradas, nombres/CI realistas, cobranza con mora
 //   vacio       solo catálogo + director                      (arranque desde cero)
 //   estructura  colegio armado, sin estudiantes               (inscribir, importar, cargar notas)
 //   promocion   fin de año con un caso de cada rama           (Paso 1 y Paso 2 de Promoción)
@@ -27,11 +28,11 @@ import { estructura } from './estructura.js'
 import { promocion } from './promocion.js'
 import { volumen } from './volumen.js'
 import { carga } from './carga.js'
-import { historico } from './historico.js'
+import { historico, demo } from './historico.js'
 import { mini } from './mini.js'
 import { importacion } from './importacion.js'
 
-const PERFILES: Record<string, Perfil> = { vacio, estructura, promocion, volumen, carga, historico, mini, importacion }
+const PERFILES: Record<string, Perfil> = { demo, vacio, estructura, promocion, volumen, carga, historico, mini, importacion }
 const DELEGADOS: Record<string, { descripcion: string; env: Record<string, string> }> = {
   defensa: { descripcion: 'El seed de siempre (prisma/seed.ts), T3 al ~85 %.', env: {} },
   cierre:  { descripcion: 'prisma/seed.ts con T3 al 100 %: listo para cerrar la gestión.', env: { SEED_T3_COMPLETO: 'si' } },

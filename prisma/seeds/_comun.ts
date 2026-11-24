@@ -14,6 +14,7 @@ import bcrypt from 'bcryptjs'
 import { PrismaClient } from '../generated/prisma/client.js'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { sembrarCatalogo } from '../seed.catalogo.js'
+import { personaDe, espacioDePrefijo, DIRECTOR_DEMO, SECRETARIA_DEMO } from './datos-bolivia.js'
 
 // ─── Contexto que reciben los perfiles ───────────────────────────────────────
 export interface Ctx {
@@ -95,22 +96,21 @@ export async function iniciar(limpiar: boolean): Promise<Ctx & { cerrar: () => P
   }
 }
 
-// ─── Nombres deterministas ───────────────────────────────────────────────────
-const NOMBRES = ['Diego', 'Camila', 'Santiago', 'Fernanda', 'Mateo', 'Paola', 'Andrés', 'Daniela', 'Gabriel', 'Natalia', 'Cristián', 'Alejandra', 'Rodrigo', 'Carla', 'Felipe', 'María', 'José', 'Rosa', 'Luis', 'Elena']
-const APELLIDOS = ['Condori', 'Mamani', 'Quispe', 'Flores', 'Tarqui', 'Huanca', 'Choque', 'Apaza', 'Ticona', 'Cruz', 'Ramos', 'Vargas', 'Torres', 'Choquehuanca', 'Paco', 'Limachi']
-export const nombreDe   = (i: number) => NOMBRES[i % NOMBRES.length]
-export const apellidoDe = (i: number) => `${APELLIDOS[i % APELLIDOS.length]} ${APELLIDOS[(i * 5 + 3) % APELLIDOS.length]}`
+// ─── Personas ────────────────────────────────────────────────────────────────
+// Los nombres, apellidos, CI (7 dígitos + complemento ocasional), sexo, teléfono y dirección
+// salen de datos-bolivia.ts: únicos, realistas y deterministas. Ver ese archivo.
+export { personaDe, type PersonaDemo } from './datos-bolivia.js'
 
 // ─── Personal ────────────────────────────────────────────────────────────────
 export async function crearDirector(ctx: Ctx) {
   const u = await ctx.prisma.usuario.create({ data: { username: 'director', passwordHash: ctx.hash.admin, roles: ['DIRECTOR'] } })
-  const p = await ctx.prisma.persona.create({ data: { ci: 'D001', nombre: 'Roberto', apellido: 'Vargas Mamani' } })
+  const p = await ctx.prisma.persona.create({ data: { ...DIRECTOR_DEMO } })
   return ctx.prisma.director.create({ data: { personaId: p.id, usuarioId: u.id } })
 }
 
 export async function crearSecretaria(ctx: Ctx) {
   const u = await ctx.prisma.usuario.create({ data: { username: 'secretaria', passwordHash: ctx.hash.sec, roles: ['SECRETARIA'] } })
-  const p = await ctx.prisma.persona.create({ data: { ci: 'S001', nombre: 'Marta', apellido: 'Rojas Ticona' } })
+  const p = await ctx.prisma.persona.create({ data: { ...SECRETARIA_DEMO } })
   return ctx.prisma.secretaria.create({ data: { personaId: p.id, usuarioId: u.id } })
 }
 
@@ -119,7 +119,7 @@ export async function crearDocentes(ctx: Ctx, n: number) {
   const docentes = []
   for (let i = 1; i <= n; i++) {
     const u = await ctx.prisma.usuario.create({ data: { username: `doc${String(i).padStart(2, '0')}`, passwordHash: ctx.hash.doc, roles: ['DOCENTE'] } })
-    const p = await ctx.prisma.persona.create({ data: { ci: `P${String(i).padStart(3, '0')}`, nombre: nombreDe(i + 4), apellido: apellidoDe(i + 40) } })
+    const p = await ctx.prisma.persona.create({ data: { ...personaDe('DOC', i) } })
     docentes.push(await ctx.prisma.docente.create({ data: { personaId: p.id, usuarioId: u.id } }))
   }
   return docentes
@@ -200,19 +200,20 @@ export async function asignarMaterias(ctx: Ctx, gestionId: number, cursos: Curso
 /** Crea n estudiantes en bloque (rápido incluso con cientos). Las primeras `conCuenta` tienen usuario est_vNNN. */
 export async function crearEstudiantes(ctx: Ctx, n: number, o: { desde?: number; prefijoCi?: string; conCuenta?: number } = {}) {
   const desde = o.desde ?? 1
-  const prefijo = o.prefijoCi ?? 'V'
+  const espacio = espacioDePrefijo(o.prefijoCi ?? 'V')
   const idx = Array.from({ length: n }, (_, k) => desde + k)
-  const ci = (i: number) => `${prefijo}${String(i).padStart(5, '0')}`
+  const datos = new Map(idx.map(i => [i, personaDe(espacio, i)]))
 
-  const personas = await ctx.prisma.persona.createManyAndReturn({
-    data: idx.map(i => ({ ci: ci(i), nombre: nombreDe(i), apellido: apellidoDe(i) })),
-  })
+  const personas = await ctx.prisma.persona.createManyAndReturn({ data: idx.map(i => ({ ...datos.get(i)! })) })
   const idPorCi = new Map(personas.map(p => [p.ci!, p.id]))
   const estudiantes = await ctx.prisma.estudiante.createManyAndReturn({
-    data: idx.map(i => ({ personaId: idPorCi.get(ci(i))! })),
+    data: idx.map(i => ({ personaId: idPorCi.get(datos.get(i)!.ci)! })),
   })
   const porPersona = new Map(estudiantes.map(e => [e.personaId, e]))
-  const lista = idx.map(i => ({ i, ci: ci(i), estudianteId: porPersona.get(idPorCi.get(ci(i))!)!.id }))
+  const lista = idx.map(i => {
+    const d = datos.get(i)!
+    return { i, ci: d.ci, nombre: d.nombre, apellido: d.apellido, estudianteId: porPersona.get(idPorCi.get(d.ci)!)!.id }
+  })
 
   for (const e of lista.slice(0, o.conCuenta ?? 0)) {
     const u = await ctx.prisma.usuario.create({ data: { username: `est_v${String(e.i).padStart(3, '0')}`, passwordHash: ctx.hash.est, roles: ['ESTUDIANTE'] } })

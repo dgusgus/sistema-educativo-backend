@@ -63,6 +63,7 @@ export const volumen: Perfil = {
     ctx.verificar((await c.curso.count({ where: { gestionId: siguiente.gestion.id } })) === 0, 'gestión siguiente vacía (para probar Copiar estructura)')
 
     mostrarCredenciales(['director / admin1234 · secretaria / sec1234 · doc01..doc08 / doc1234 · est_v001..est_v040 / est1234'])
-    console.log('\nPRUEBAS SUGERIDAS: Estudiantes (paginación y búsqueda, "Ana Condori", CI "V00450") · Gestiones → Copiar estructura · Boletines y Reportes por curso.')
+    const ej = estudiantes[449]
+    console.log(`\nPRUEBAS SUGERIDAS: Estudiantes (paginación y búsqueda, "${ej.nombre} ${ej.apellido}", CI "${ej.ci}") · Gestiones → Copiar estructura · Boletines y Reportes por curso.`)
   },
 }

@@ -27,10 +27,9 @@ import { MATERIAS } from '../seed.catalogo.js'
 import {
   crearGestion, crearDimensiones, crearCursos, crearEstudiantes, MATERIAS_DICTADAS, utc, type Ctx, type Perfil,
 } from './_comun.js'
-import { carga } from './carga.js'
+import { carga, construirCarga } from './carga.js'
 
 const GRADOS = [1, 2, 3, 4, 5, 6]
-const PARALELOS = ['A', 'B', 'C', 'D']
 const HORAS: Record<string, number> = Object.fromEntries(MATERIAS.map(m => [m.codigo, m.horas]))
 
 type Estado = 'PROMUEVE' | 'REPRUEBA' | 'RETIRO'
@@ -73,187 +72,225 @@ function pctAsistencia(gi: number, hace: number): number {
   return clamp(base - (hace === 2 ? 2 : 0.5) + ((gi * 3) % 5) * 0.4, 35, 100)
 }
 
-export const historico: Perfil = {
-  descripcion: '"carga" (900 inscritos, detalle completo) + 2 gestiones anteriores CERRADAS con continuidad de estudiantes, repetidores, egresados y retirados.',
-  async sembrar(ctx: Ctx) {
-    const t0 = Date.now()
-    const paso = (m: string) => console.log(`✓ ${m} (${((Date.now() - t0) / 1000).toFixed(0)} s)`)
-
-    // 1) Gestión actual completa (idéntica al perfil "carga")
-    await carga.sembrar(ctx)
-    const c = ctx.prisma
-    console.log('\n── Gestiones anteriores ──')
-
-    const director = await c.director.findFirstOrThrow()
-    const docentes = await c.docente.findMany({ orderBy: { id: 'asc' }, take: MATERIAS_DICTADAS.reduce((s, cod) => s + HORAS[cod] + 1, 0) })
-
-    // 2) Estudiantes actuales y su grado hoy
-    const actuales = await c.inscripcion.findMany({
-      where: { gestion: { anio: ctx.ANIO } },
-      select: { estudianteId: true, curso: { select: { grado: true } }, estudiante: { select: { persona: { select: { ci: true } } } } },
-    })
-    const actual = actuales.map(a => ({ estudianteId: a.estudianteId, grado: a.curso.grado, gi: Number(a.estudiante.persona.ci!.slice(1)) }))
-
-    // 3) Estudiantes que ya egresaron / se retiraron antes (no están en la gestión actual)
-    const E = await crearEstudiantes(ctx, 150, { desde: 1, prefijoCi: 'E' })   // terminaron 6.° el año pasado
-    const F = await crearEstudiantes(ctx, 150, { desde: 1, prefijoCi: 'F' })   // terminaron 6.° hace dos años
-    const X = await crearEstudiantes(ctx, 40,  { desde: 1, prefijoCi: 'X' })   // se retiraron (20 y 20)
-    await c.$executeRawUnsafe(`UPDATE "Estudiante" SET rude = 'R' || LPAD(id::text, 9, '0') WHERE rude IS NULL`)
-
-    // 4) Trayectoria de cada uno (año-2 = 2, año-1 = 1)
-    const specs: Spec[] = []
-    const Y2 = ctx.ANIO - 2, Y1 = ctx.ANIO - 1
-    for (const a of actual) {
-      const repite2026 = a.gi % 25 === 3                          // ~4 %: el año pasado reprobó este mismo grado
-      const repitio2024 = !repite2026 && a.grado >= 2 && a.gi % 33 === 5   // ~3 %: reprobó hace dos años
-      const base = { estudianteId: a.estudianteId, gi: a.gi }
-      if (repite2026) {
-        specs.push({ ...base, anio: Y1, grado: a.grado, estado: 'REPRUEBA', trimestresCursados: 3 })
-        if (a.grado >= 2) specs.push({ ...base, anio: Y2, grado: a.grado - 1, estado: 'PROMUEVE', trimestresCursados: 3 })
-      } else if (repitio2024) {
-        specs.push({ ...base, anio: Y2, grado: a.grado - 1, estado: 'REPRUEBA', trimestresCursados: 3 })
-        specs.push({ ...base, anio: Y1, grado: a.grado - 1, estado: 'PROMUEVE', trimestresCursados: 3 })
-      } else {
-        if (a.grado >= 2) specs.push({ ...base, anio: Y1, grado: a.grado - 1, estado: 'PROMUEVE', trimestresCursados: 3 })
-        if (a.grado >= 3) specs.push({ ...base, anio: Y2, grado: a.grado - 2, estado: 'PROMUEVE', trimestresCursados: 3 })
-      }
-    }
-    E.forEach(e => {
-      specs.push({ anio: Y2, estudianteId: e.estudianteId, gi: 1000 + e.i, grado: 5, estado: 'PROMUEVE', trimestresCursados: 3 })
-      specs.push({ anio: Y1, estudianteId: e.estudianteId, gi: 1000 + e.i, grado: 6, estado: 'PROMUEVE', trimestresCursados: 3 })
-    })
-    F.forEach(f => specs.push({ anio: Y2, estudianteId: f.estudianteId, gi: 2000 + f.i, grado: 6, estado: 'PROMUEVE', trimestresCursados: 3 }))
-    X.forEach((x, n) => specs.push({
-      anio: n < 20 ? Y2 : Y1, estudianteId: x.estudianteId, gi: 3000 + x.i, grado: GRADOS[n % 6],
-      estado: 'RETIRO', trimestresCursados: n % 2 === 0 ? 1 : 2,
-    }))
-    paso(`${actual.length} actuales + ${E.length + F.length + X.length} egresados/retirados → ${specs.length} inscripciones históricas`)
-
-    // 5) Una gestión cerrada por año
-    const resumenAnios: string[] = []
-    for (const anio of [Y2, Y1]) {
-      const hace = ctx.ANIO - anio
-      const { gestion, trimestres } = await crearGestion(ctx, {
-        anio, activa: false, descripcion: `Gestión Escolar ${anio} (cerrada)`, directorId: director.id,
-        meses: [{ y: anio, m: 3 }, { y: anio, m: 6 }, { y: anio, m: 9 }], cerrados: [true, true, true],
-      })
-      await crearDimensiones(ctx, gestion.id)
-      const cursos = await crearCursos(ctx, gestion.id, GRADOS, PARALELOS)
-      await c.curso.updateMany({ where: { gestionId: gestion.id }, data: { capacidad: 45 } })
-
-      // mismas asignaciones que la gestión actual (h+1 docentes por materia)
-      const pools = MATERIAS_DICTADAS.map(cod => HORAS[cod] + 1)
-      const inicio: number[] = []
-      pools.reduce((acc, h, i) => { inicio[i] = acc; return acc + h }, 0)
-      const dmcFilas = await c.docenteMateriaCurso.createManyAndReturn({
-        data: cursos.flatMap((cu, ci) => MATERIAS_DICTADAS.map((cod, mi) => ({
-          gestionId: gestion.id, cursoId: cu.id, materiaId: ctx.materias[cod].id, docenteId: docentes[inicio[mi] + (ci % pools[mi])].id,
-        }))),
-      })
-      const codDe = new Map(MATERIAS_DICTADAS.map(cod => [ctx.materias[cod].id, cod]))
-      const dmcsDe = new Map<number, { id: number; codigo: string }[]>()
-      for (const f of dmcFilas) dmcsDe.set(f.cursoId, [...(dmcsDe.get(f.cursoId) ?? []), { id: f.id, codigo: codDe.get(f.materiaId)! }])
-      for (const l of dmcsDe.values()) l.sort((a, b) => MATERIAS_DICTADAS.indexOf(a.codigo as never) - MATERIAS_DICTADAS.indexOf(b.codigo as never))
-
-      // Inscripciones: cada grado se reparte parejo entre A-D
-      const delAnio = specs.filter(s => s.anio === anio).sort((a, b) => a.grado - b.grado || a.estudianteId - b.estudianteId)
-      const contador = new Map<number, number>()
-      const conCurso = delAnio.map(s => {
-        const n = contador.get(s.grado) ?? 0
-        contador.set(s.grado, n + 1)
-        return { s, curso: cursos.find(cu => cu.grado === s.grado && cu.paralelo === PARALELOS[n % 4])! }
-      })
-      const inscripciones = await c.inscripcion.createManyAndReturn({
-        data: conCurso.map(({ s, curso }) => ({
-          estudianteId: s.estudianteId, cursoId: curso.id, gestionId: gestion.id, fechaInscripcion: utc(anio, 2, 1),
-          ...(s.estado === 'RETIRO'
-            ? { estadoInscripcion: 'RETIRADA' as const, fechaRetiro: utc(anio, s.trimestresCursados === 1 ? 5 : 8, 12), observaciones: 'Cambio de domicilio' }
-            : {}),
-        })),
-      })
-
-      // Notas, promedios finales, asistencia
-      const califs: { inscripcionId: number; docenteMateriaCursoId: number; trimestreId: number; promedioTrimestral: number }[] = []
-      const finales: { inscripcionId: number; docenteMateriaCursoId: number; promedioFinal: number; resultado: 'PROMOVIDO' | 'REPROBADO' }[] = []
-      const resumenes: { inscripcionId: number; docenteMateriaCursoId: number; trimestreId: number; totalClases: number; totalPresente: number; totalAusente: number; totalRetraso: number; totalJustificado: number; porcentaje: number }[] = []
-      const resultados: { id: number; resultado: 'PROMOVIDO' | 'REPROBADO' }[] = []
-
-      inscripciones.forEach((insc, n) => {
-        const { s } = conCurso[n]
-        const dmcs = dmcsDe.get(insc.cursoId)!
-        let aprueba = true
-        dmcs.forEach(d => {
-          const notas: number[] = []
-          for (let t = 0; t < s.trimestresCursados; t++) {
-            const nota = Math.round(fraccion(s, hace, d.codigo, t) * 100)
-            notas.push(nota)
-            califs.push({ inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trimestres[t].id, promedioTrimestral: nota })
-            // Asistencia del trimestre (resumen): clases = horas/semana × 11 semanas
-            const clases = HORAS[d.codigo] * 11
-            const pct = pctAsistencia(s.gi, hace) + (t === 2 ? 0.8 : 0)
-            const faltas = Math.round(clases * (1 - clamp(pct, 0, 100) / 100))
-            const justificado = Math.round(faltas * 0.25)
-            const retraso = Math.round(clases * 0.03)
-            const ausente = Math.max(0, faltas - justificado)
-            const presente = Math.max(0, clases - ausente - justificado - retraso)
-            resumenes.push({
-              inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trimestres[t].id, totalClases: clases,
-              totalPresente: presente, totalAusente: ausente, totalRetraso: retraso, totalJustificado: justificado,
-              porcentaje: redondea(((presente + justificado) / clases) * 100),
-            })
-          }
-          if (s.trimestresCursados === 3) {
-            const prom = redondea(notas.reduce((a, b) => a + b, 0) / 3)
-            if (prom < 51) aprueba = false
-            finales.push({ inscripcionId: insc.id, docenteMateriaCursoId: d.id, promedioFinal: prom, resultado: prom >= 51 ? 'PROMOVIDO' : 'REPROBADO' })
-          }
-        })
-        if (s.trimestresCursados === 3) resultados.push({ id: insc.id, resultado: aprueba ? 'PROMOVIDO' : 'REPROBADO' })
-      })
-
-      await insertar(califs, 5000, l => c.calificacion.createMany({ data: l }))
-      await insertar(finales, 5000, l => c.promedioFinal.createMany({ data: l }))
-      await insertar(resumenes, 5000, l => c.resumenAsistencia.createMany({ data: l }))
-      for (const res of ['PROMOVIDO', 'REPROBADO'] as const) {
-        const ids = resultados.filter(r => r.resultado === res).map(r => r.id)
-        await insertar(ids, 5000, l => c.inscripcion.updateMany({ where: { id: { in: l } }, data: { resultado: res } }))
-      }
-      resumenAnios.push(`${anio}: ${inscripciones.length} inscritos, ${resultados.filter(r => r.resultado === 'REPROBADO').length} reprobados, ${conCurso.filter(x => x.s.estado === 'RETIRO').length} retirados`)
-      paso(`gestión ${anio} cerrada: ${inscripciones.length} inscripciones, ${califs.length} calificaciones, ${finales.length} promedios finales, ${resumenes.length} resúmenes de asistencia`)
-    }
-
-    // 6) Verificación
-    console.log('\nVerificación (histórico):')
-    const v = ctx.verificar
-    for (const anio of [Y2, Y1]) {
-      const g = await c.gestion.findUniqueOrThrow({ where: { anio } })
-      const tot = await c.inscripcion.count({ where: { gestionId: g.id } })
-      const rep = await c.inscripcion.count({ where: { gestionId: g.id, resultado: 'REPROBADO' } })
-      const pro = await c.inscripcion.count({ where: { gestionId: g.id, resultado: 'PROMOVIDO' } })
-      const ret = await c.inscripcion.count({ where: { gestionId: g.id, estadoInscripcion: 'RETIRADA' } })
-      v(!g.activa && (await c.trimestre.count({ where: { gestionId: g.id, cerrado: true } })) === 3, `${anio}: gestión inactiva con los 3 trimestres cerrados`)
-      v(tot > 800 && pro + rep + ret === tot, `${anio}: ${tot} inscritos = ${pro} promovidos + ${rep} reprobados + ${ret} retirados`)
-      const tasa = (pro / (pro + rep)) * 100
-      v(tasa > 85 && tasa < 97, `${anio}: tasa de aprobación realista (${tasa.toFixed(1)} %)`)
-    }
-    // un estudiante de 4.° de la gestión actual debe tener 3 gestiones consecutivas
-    const ejemplo = await c.inscripcion.findFirst({
-      where: { gestion: { anio: ctx.ANIO }, curso: { grado: 5 }, estudiante: { persona: { ci: { startsWith: 'V' } } } },
-      orderBy: { id: 'asc' }, select: { estudianteId: true },
-    })
-    const trayectoria = await c.inscripcion.findMany({ where: { estudianteId: ejemplo!.estudianteId }, orderBy: { gestion: { anio: 'asc' } }, select: { gestion: { select: { anio: true } }, curso: { select: { grado: true } }, resultado: true } })
-    v(trayectoria.length >= 2, `trayectoria de un estudiante de 5.°: ${trayectoria.map(t => `${t.gestion.anio} ${t.curso.grado}°(${t.resultado})`).join(' → ')}`)
-    const promediosPorAnio = await c.$queryRaw<{ anio: number; promedio: number }[]>`
-      SELECT g.anio, AVG(pf."promedioFinal")::float AS promedio FROM "PromedioFinal" pf
-      JOIN "Inscripcion" i ON i.id = pf."inscripcionId" JOIN "Gestion" g ON g.id = i."gestionId" GROUP BY g.anio ORDER BY g.anio`
-    v(promediosPorAnio.length === 2 && promediosPorAnio[1].promedio > promediosPorAnio[0].promedio,
-      `el promedio mejora año a año (${promediosPorAnio.map(p => `${p.anio}: ${p.promedio.toFixed(1)}`).join(' → ')})`)
-    const ids = await c.docenteMateriaCurso.count()
-    v(ids === 24 * MATERIAS_DICTADAS.length * 3, `${ids} asignaciones docente-materia-curso (3 gestiones)`)
-
-    console.log('\nRESUMEN:')
-    resumenAnios.forEach(r => console.log(`  ${r}`))
-    console.log('\nPRUEBAS SUGERIDAS: Historial académico (busca un estudiante con CI V00600: 3 gestiones; E00001: egresado) · '
-      + 'Reportes → Comparativo entre gestiones · Boletín/Libreta de una gestión pasada · Promoción de la gestión actual.')
-  },
+export interface OpcionesHistorico {
+  /** Perfil que siembra la gestión actual */
+  base: Perfil
+  /** Estudiantes inscritos en la gestión actual (para escalar egresados y retirados) */
+  total: number
+  paralelos: string[]
+  descripcion: string
 }
+
+export function construirHistorico(o: OpcionesHistorico): Perfil {
+  const PARALELOS = o.paralelos
+  // Proporción del colegio original (900): 150 egresados por promoción y 40 retirados
+  const nEgresados = Math.round(o.total / 6)
+  const nRetirados = Math.max(4, Math.round(o.total * 40 / 900) & ~1)
+  return {
+    descripcion: o.descripcion,
+    async sembrar(ctx: Ctx) {
+      const t0 = Date.now()
+      const paso = (m: string) => console.log(`✓ ${m} (${((Date.now() - t0) / 1000).toFixed(0)} s)`)
+
+      // 1) Gestión actual completa (idéntica al perfil "carga")
+      await o.base.sembrar(ctx)
+      const c = ctx.prisma
+      console.log('\n── Gestiones anteriores ──')
+
+      const director = await c.director.findFirstOrThrow()
+      const docentes = await c.docente.findMany({ orderBy: { id: 'asc' }, take: MATERIAS_DICTADAS.reduce((s, cod) => s + HORAS[cod] + 1, 0) })
+
+      // 2) Estudiantes actuales y su grado hoy
+      // `gi` = posición del estudiante (1, 2, 3…) en el orden en que se crearon: ya no se puede sacar del CI
+      // (ahora son 7 dígitos sin relación con el orden), pero los ids de Estudiante siguen ese orden.
+      const actuales = await c.inscripcion.findMany({
+        where: { gestion: { anio: ctx.ANIO } },
+        orderBy: { estudianteId: 'asc' },
+        select: { estudianteId: true, curso: { select: { grado: true } } },
+      })
+      const actual = actuales.map((a, n) => ({ estudianteId: a.estudianteId, grado: a.curso.grado, gi: n + 1 }))
+
+      // 3) Estudiantes que ya egresaron / se retiraron antes (no están en la gestión actual)
+      const E = await crearEstudiantes(ctx, nEgresados, { desde: 1, prefijoCi: 'E' })   // terminaron 6.° el año pasado
+      const F = await crearEstudiantes(ctx, nEgresados, { desde: 1, prefijoCi: 'F' })   // terminaron 6.° hace dos años
+      const X = await crearEstudiantes(ctx, nRetirados, { desde: 1, prefijoCi: 'X' })   // se retiraron (la mitad cada año)
+      await c.$executeRawUnsafe(`UPDATE "Estudiante" SET rude = 'R' || LPAD(id::text, 9, '0') WHERE rude IS NULL`)
+
+      // 4) Trayectoria de cada uno (año-2 = 2, año-1 = 1)
+      const specs: Spec[] = []
+      const Y2 = ctx.ANIO - 2, Y1 = ctx.ANIO - 1
+      for (const a of actual) {
+        const repite2026 = a.gi % 25 === 3                          // ~4 %: el año pasado reprobó este mismo grado
+        const repitio2024 = !repite2026 && a.grado >= 2 && a.gi % 33 === 5   // ~3 %: reprobó hace dos años
+        const base = { estudianteId: a.estudianteId, gi: a.gi }
+        if (repite2026) {
+          specs.push({ ...base, anio: Y1, grado: a.grado, estado: 'REPRUEBA', trimestresCursados: 3 })
+          if (a.grado >= 2) specs.push({ ...base, anio: Y2, grado: a.grado - 1, estado: 'PROMUEVE', trimestresCursados: 3 })
+        } else if (repitio2024) {
+          specs.push({ ...base, anio: Y2, grado: a.grado - 1, estado: 'REPRUEBA', trimestresCursados: 3 })
+          specs.push({ ...base, anio: Y1, grado: a.grado - 1, estado: 'PROMUEVE', trimestresCursados: 3 })
+        } else {
+          if (a.grado >= 2) specs.push({ ...base, anio: Y1, grado: a.grado - 1, estado: 'PROMUEVE', trimestresCursados: 3 })
+          if (a.grado >= 3) specs.push({ ...base, anio: Y2, grado: a.grado - 2, estado: 'PROMUEVE', trimestresCursados: 3 })
+        }
+      }
+      E.forEach(e => {
+        specs.push({ anio: Y2, estudianteId: e.estudianteId, gi: 1000 + e.i, grado: 5, estado: 'PROMUEVE', trimestresCursados: 3 })
+        specs.push({ anio: Y1, estudianteId: e.estudianteId, gi: 1000 + e.i, grado: 6, estado: 'PROMUEVE', trimestresCursados: 3 })
+      })
+      F.forEach(f => specs.push({ anio: Y2, estudianteId: f.estudianteId, gi: 2000 + f.i, grado: 6, estado: 'PROMUEVE', trimestresCursados: 3 }))
+      X.forEach((x, n) => specs.push({
+        anio: n < nRetirados / 2 ? Y2 : Y1, estudianteId: x.estudianteId, gi: 3000 + x.i, grado: GRADOS[n % 6],
+        estado: 'RETIRO', trimestresCursados: n % 2 === 0 ? 1 : 2,
+      }))
+      paso(`${actual.length} actuales + ${E.length + F.length + X.length} egresados/retirados → ${specs.length} inscripciones históricas`)
+
+      // 5) Una gestión cerrada por año
+      const resumenAnios: string[] = []
+      for (const anio of [Y2, Y1]) {
+        const hace = ctx.ANIO - anio
+        const { gestion, trimestres } = await crearGestion(ctx, {
+          anio, activa: false, descripcion: `Gestión Escolar ${anio} (cerrada)`, directorId: director.id,
+          meses: [{ y: anio, m: 3 }, { y: anio, m: 6 }, { y: anio, m: 9 }], cerrados: [true, true, true],
+        })
+        await crearDimensiones(ctx, gestion.id)
+        const cursos = await crearCursos(ctx, gestion.id, GRADOS, PARALELOS)
+        await c.curso.updateMany({ where: { gestionId: gestion.id }, data: { capacidad: 45 } })
+
+        // mismas asignaciones que la gestión actual (h+1 docentes por materia)
+        const pools = MATERIAS_DICTADAS.map(cod => HORAS[cod] + 1)
+        const inicio: number[] = []
+        pools.reduce((acc, h, i) => { inicio[i] = acc; return acc + h }, 0)
+        const dmcFilas = await c.docenteMateriaCurso.createManyAndReturn({
+          data: cursos.flatMap((cu, ci) => MATERIAS_DICTADAS.map((cod, mi) => ({
+            gestionId: gestion.id, cursoId: cu.id, materiaId: ctx.materias[cod].id, docenteId: docentes[inicio[mi] + (ci % pools[mi])].id,
+          }))),
+        })
+        const codDe = new Map(MATERIAS_DICTADAS.map(cod => [ctx.materias[cod].id, cod]))
+        const dmcsDe = new Map<number, { id: number; codigo: string }[]>()
+        for (const f of dmcFilas) dmcsDe.set(f.cursoId, [...(dmcsDe.get(f.cursoId) ?? []), { id: f.id, codigo: codDe.get(f.materiaId)! }])
+        for (const l of dmcsDe.values()) l.sort((a, b) => MATERIAS_DICTADAS.indexOf(a.codigo as never) - MATERIAS_DICTADAS.indexOf(b.codigo as never))
+
+        // Inscripciones: cada grado se reparte parejo entre A-D
+        const delAnio = specs.filter(s => s.anio === anio).sort((a, b) => a.grado - b.grado || a.estudianteId - b.estudianteId)
+        const contador = new Map<number, number>()
+        const conCurso = delAnio.map(s => {
+          const n = contador.get(s.grado) ?? 0
+          contador.set(s.grado, n + 1)
+          return { s, curso: cursos.find(cu => cu.grado === s.grado && cu.paralelo === PARALELOS[n % PARALELOS.length])! }
+        })
+        const inscripciones = await c.inscripcion.createManyAndReturn({
+          data: conCurso.map(({ s, curso }) => ({
+            estudianteId: s.estudianteId, cursoId: curso.id, gestionId: gestion.id, fechaInscripcion: utc(anio, 2, 1),
+            ...(s.estado === 'RETIRO'
+              ? { estadoInscripcion: 'RETIRADA' as const, fechaRetiro: utc(anio, s.trimestresCursados === 1 ? 5 : 8, 12), observaciones: 'Cambio de domicilio' }
+              : {}),
+          })),
+        })
+
+        // Notas, promedios finales, asistencia
+        const califs: { inscripcionId: number; docenteMateriaCursoId: number; trimestreId: number; promedioTrimestral: number }[] = []
+        const finales: { inscripcionId: number; docenteMateriaCursoId: number; promedioFinal: number; resultado: 'PROMOVIDO' | 'REPROBADO' }[] = []
+        const resumenes: { inscripcionId: number; docenteMateriaCursoId: number; trimestreId: number; totalClases: number; totalPresente: number; totalAusente: number; totalRetraso: number; totalJustificado: number; porcentaje: number }[] = []
+        const resultados: { id: number; resultado: 'PROMOVIDO' | 'REPROBADO' }[] = []
+
+        inscripciones.forEach((insc, n) => {
+          const { s } = conCurso[n]
+          const dmcs = dmcsDe.get(insc.cursoId)!
+          let aprueba = true
+          dmcs.forEach(d => {
+            const notas: number[] = []
+            for (let t = 0; t < s.trimestresCursados; t++) {
+              const nota = Math.round(fraccion(s, hace, d.codigo, t) * 100)
+              notas.push(nota)
+              califs.push({ inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trimestres[t].id, promedioTrimestral: nota })
+              // Asistencia del trimestre (resumen): clases = horas/semana × 11 semanas
+              const clases = HORAS[d.codigo] * 11
+              const pct = pctAsistencia(s.gi, hace) + (t === 2 ? 0.8 : 0)
+              const faltas = Math.round(clases * (1 - clamp(pct, 0, 100) / 100))
+              const justificado = Math.round(faltas * 0.25)
+              const retraso = Math.round(clases * 0.03)
+              const ausente = Math.max(0, faltas - justificado)
+              const presente = Math.max(0, clases - ausente - justificado - retraso)
+              resumenes.push({
+                inscripcionId: insc.id, docenteMateriaCursoId: d.id, trimestreId: trimestres[t].id, totalClases: clases,
+                totalPresente: presente, totalAusente: ausente, totalRetraso: retraso, totalJustificado: justificado,
+                porcentaje: redondea(((presente + justificado) / clases) * 100),
+              })
+            }
+            if (s.trimestresCursados === 3) {
+              const prom = redondea(notas.reduce((a, b) => a + b, 0) / 3)
+              if (prom < 51) aprueba = false
+              finales.push({ inscripcionId: insc.id, docenteMateriaCursoId: d.id, promedioFinal: prom, resultado: prom >= 51 ? 'PROMOVIDO' : 'REPROBADO' })
+            }
+          })
+          if (s.trimestresCursados === 3) resultados.push({ id: insc.id, resultado: aprueba ? 'PROMOVIDO' : 'REPROBADO' })
+        })
+
+        await insertar(califs, 5000, l => c.calificacion.createMany({ data: l }))
+        await insertar(finales, 5000, l => c.promedioFinal.createMany({ data: l }))
+        await insertar(resumenes, 5000, l => c.resumenAsistencia.createMany({ data: l }))
+        for (const res of ['PROMOVIDO', 'REPROBADO'] as const) {
+          const ids = resultados.filter(r => r.resultado === res).map(r => r.id)
+          await insertar(ids, 5000, l => c.inscripcion.updateMany({ where: { id: { in: l } }, data: { resultado: res } }))
+        }
+        resumenAnios.push(`${anio}: ${inscripciones.length} inscritos, ${resultados.filter(r => r.resultado === 'REPROBADO').length} reprobados, ${conCurso.filter(x => x.s.estado === 'RETIRO').length} retirados`)
+        paso(`gestión ${anio} cerrada: ${inscripciones.length} inscripciones, ${califs.length} calificaciones, ${finales.length} promedios finales, ${resumenes.length} resúmenes de asistencia`)
+      }
+
+      // 6) Verificación
+      console.log('\nVerificación (histórico):')
+      const v = ctx.verificar
+      for (const anio of [Y2, Y1]) {
+        const g = await c.gestion.findUniqueOrThrow({ where: { anio } })
+        const tot = await c.inscripcion.count({ where: { gestionId: g.id } })
+        const rep = await c.inscripcion.count({ where: { gestionId: g.id, resultado: 'REPROBADO' } })
+        const pro = await c.inscripcion.count({ where: { gestionId: g.id, resultado: 'PROMOVIDO' } })
+        const ret = await c.inscripcion.count({ where: { gestionId: g.id, estadoInscripcion: 'RETIRADA' } })
+        v(!g.activa && (await c.trimestre.count({ where: { gestionId: g.id, cerrado: true } })) === 3, `${anio}: gestión inactiva con los 3 trimestres cerrados`)
+        v(tot > o.total * 0.88 && pro + rep + ret === tot, `${anio}: ${tot} inscritos = ${pro} promovidos + ${rep} reprobados + ${ret} retirados`)
+        const tasa = (pro / (pro + rep)) * 100
+        v(tasa > 85 && tasa < 97, `${anio}: tasa de aprobación realista (${tasa.toFixed(1)} %)`)
+      }
+      // un estudiante de 4.° de la gestión actual debe tener 3 gestiones consecutivas
+      const ejemplo = await c.inscripcion.findFirst({
+        where: { gestion: { anio: ctx.ANIO }, curso: { grado: 5 } },
+        orderBy: { id: 'asc' }, select: { estudianteId: true },
+      })
+      const trayectoria = await c.inscripcion.findMany({ where: { estudianteId: ejemplo!.estudianteId }, orderBy: { gestion: { anio: 'asc' } }, select: { gestion: { select: { anio: true } }, curso: { select: { grado: true } }, resultado: true } })
+      v(trayectoria.length >= 2, `trayectoria de un estudiante de 5.°: ${trayectoria.map(t => `${t.gestion.anio} ${t.curso.grado}°(${t.resultado})`).join(' → ')}`)
+      const promediosPorAnio = await c.$queryRaw<{ anio: number; promedio: number }[]>`
+        SELECT g.anio, AVG(pf."promedioFinal")::float AS promedio FROM "PromedioFinal" pf
+        JOIN "Inscripcion" i ON i.id = pf."inscripcionId" JOIN "Gestion" g ON g.id = i."gestionId" GROUP BY g.anio ORDER BY g.anio`
+      v(promediosPorAnio.length === 2 && promediosPorAnio[1].promedio > promediosPorAnio[0].promedio,
+        `el promedio mejora año a año (${promediosPorAnio.map(p => `${p.anio}: ${p.promedio.toFixed(1)}`).join(' → ')})`)
+      const ids = await c.docenteMateriaCurso.count()
+      v(ids === GRADOS.length * PARALELOS.length * MATERIAS_DICTADAS.length * 3, `${ids} asignaciones docente-materia-curso (3 gestiones)`)
+
+      console.log('\nRESUMEN:')
+      resumenAnios.forEach(r => console.log(`  ${r}`))
+      const pe = await c.persona.findFirstOrThrow({ where: { estudiante: { id: ejemplo!.estudianteId } } })
+      console.log(`\nPRUEBAS SUGERIDAS: Historial académico (busca a ${pe.nombre} ${pe.apellido}, CI ${pe.ci}: 3 gestiones; ${E[0].nombre} ${E[0].apellido}, CI ${E[0].ci}: egresado) · `
+        + 'Reportes → Comparativo entre gestiones · Boletín/Libreta de una gestión pasada · Promoción de la gestión actual.')
+    },
+  }
+}
+
+/** "carga" (900 inscritos, detalle completo) + 2 gestiones anteriores cerradas. */
+export const historico = construirHistorico({
+  base: carga, total: 900, paralelos: ['A', 'B', 'C', 'D'],
+  descripcion: '"carga" (900 inscritos, detalle completo) + 2 gestiones anteriores CERRADAS con continuidad de estudiantes, repetidores, egresados y retirados.',
+})
+
+/**
+ * PERFIL "demo" — el recomendado para la DEFENSA: 500 inscritos, 3 gestiones, todo lo que muestra el sistema.
+ * 18 cursos (6 grados × A, B, C), ~28 por curso; pensión en cuotas mensuales con mora para Cobranza.
+ */
+export const demo = construirHistorico({
+  base: construirCarga({
+    total: 500, paralelos: ['A', 'B', 'C'], cuotas: true,
+    descripcion: '500 inscritos en 18 cursos (A-C) con horarios, notas por actividad, asistencia, tutores, pagos en cuotas con mora.',
+  }),
+  total: 500, paralelos: ['A', 'B', 'C'],
+  descripcion: 'DEFENSA: 500 inscritos (18 cursos), 2 gestiones anteriores cerradas, personas con nombre y CI realistas, cobranza con mora.',
+})

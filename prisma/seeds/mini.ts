@@ -10,17 +10,17 @@
 //     Hacer/Decidir), notas, calificaciones, asistencia clase por clase + resúmenes, promedios finales (años
 //     cerrados), tutores y pagos.
 //
-// Estudiantes (CI V00001..V00010) y su recorrido — todos los cursos de todos los años quedan con 2 alumnos:
-//   A V00001  2026: 1.° ALTO, asistencia perfecta
-//   B V00002  2026: 1.° REPRUEBA Matemáticas (aprobará/reprobará según el cierre), asistencia 88 %
-//   C V00003  2025: 1.° → 2026: 2.°                         · medio
-//   D V00004  2025: 1.° → 2026: 2.°                         · asistencia CRÍTICA (~52 %, sale en alertas)
-//   E V00005  2024: 1.° → 2025: 2.° → 2026: 3.°             · alto
-//   F V00006  igual que E, pero se RETIRA en el 2.° trimestre de 2026
-//   G V00007  2024: 2.° → 2025: 3.° (egresa)
-//   H V00008  2024: 2.° → 2025: 3.° REPRUEBA Matemáticas (no egresa)
-//   I V00009  2024: 3.° (egresa)
-//   J V00010  2024: 3.° se RETIRA en el 2.° trimestre
+// Estudiantes (los 10 primeros del generador, A..J) y su recorrido — todos los cursos de todos los años quedan con 2 alumnos:
+//   A (#1)  2026: 1.° ALTO, asistencia perfecta
+//   B (#2)  2026: 1.° REPRUEBA Matemáticas (aprobará/reprobará según el cierre), asistencia 88 %
+//   C (#3)  2025: 1.° → 2026: 2.°                         · medio
+//   D (#4)  2025: 1.° → 2026: 2.°                         · asistencia CRÍTICA (~52 %, sale en alertas)
+//   E (#5)  2024: 1.° → 2025: 2.° → 2026: 3.°             · alto
+//   F (#6)  igual que E, pero se RETIRA en el 2.° trimestre de 2026
+//   G (#7)  2024: 2.° → 2025: 3.° (egresa)
+//   H (#8)  2024: 2.° → 2025: 3.° REPRUEBA Matemáticas (no egresa)
+//   I (#9)  2024: 3.° (egresa)
+//   J (#10)  2024: 3.° se RETIRA en el 2.° trimestre
 //
 // Cuentas (solo desarrollo): director / admin1234 (entra como Director y como Docente) · secretaria / sec1234 ·
 //   doc01, doc02 / doc1234 · est_v001..est_v006 / est1234 · tut_v001..tut_v003 / tut1234
@@ -30,7 +30,7 @@ import bcrypt from 'bcryptjs'
 import { MATERIAS } from '../seed.catalogo.js'
 import {
   crearDirector, crearSecretaria, crearDocentes, crearGestion, crearDimensiones, crearConceptosPago,
-  crearCursos, crearEstudiantes, mesRel, mostrarCredenciales, ultimoDia, utc, nombreDe, apellidoDe,
+  crearCursos, crearEstudiantes, mesRel, mostrarCredenciales, ultimoDia, utc, personaDe,
   MATERIAS_DICTADAS, type Ctx, type Perfil,
 } from './_comun.js'
 
@@ -141,7 +141,7 @@ export const mini: Perfil = {
     const hashTut = await bcrypt.hash('tut1234', 4)
     const parejas = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
     for (let n = 0; n < parejas.length; n++) {
-      const p = await c.persona.create({ data: { ci: `T${String(n + 1).padStart(5, '0')}`, nombre: nombreDe(n * 3 + 1), apellido: apellidoDe(n * 7 + 2), telefono: `7910000${n}` } })
+      const p = await c.persona.create({ data: { ...personaDe('TUT', n + 1) } })
       const t = await c.tutor.create({ data: { personaId: p.id, ocupacion: ['Comerciante', 'Chofer', 'Enfermera', 'Costurera', 'Mecánico'][n] } })
       if (n < 3) {
         const u = await c.usuario.create({ data: { username: `tut_v${String(n + 1).padStart(3, '0')}`, passwordHash: hashTut, roles: ['TUTOR'] } })
@@ -339,10 +339,10 @@ export const mini: Perfil = {
     v((await c.promedioFinal.count({ where: { inscripcion: { gestion: { activa: false } } } })) > 0 && (await c.promedioFinal.count({ where: { inscripcion: { gestion: { activa: true } } } })) === 0,
       'promedios finales en los años cerrados; la gestión actual aún no (nacen al cerrar T3)')
     const reprob = await c.inscripcion.findMany({ where: { resultado: 'REPROBADO' }, select: { estudiante: { select: { persona: { select: { ci: true } } } }, gestion: { select: { anio: true } } } })
-    v(reprob.length === 1 && reprob[0].estudiante.persona.ci === 'V00008', 'un reprobado en el pasado (V00008, 3.° del año pasado)')
+    v(reprob.length === 1 && reprob[0].estudiante.persona.ci === estudiantes[7].ci, `un reprobado en el pasado (${estudiantes[7].nombre} ${estudiantes[7].apellido}, CI ${estudiantes[7].ci}, 3.° del año pasado)`)
     v((await c.asistencia.count()) > 0 && (await c.resumenAsistencia.count()) > 0, 'asistencias y resúmenes en las 3 gestiones')
     const trayectoria = await c.inscripcion.findMany({ where: { estudianteId: estId(5) }, orderBy: { gestion: { anio: 'asc' } }, select: { gestion: { select: { anio: true } }, curso: { select: { grado: true } } } })
-    v(trayectoria.length === 3, `V00005 recorre 3 gestiones: ${trayectoria.map(t => `${t.gestion.anio} ${t.curso.grado}°`).join(' → ')}`)
+    v(trayectoria.length === 3, `${estudiantes[4].nombre} ${estudiantes[4].apellido} (CI ${estudiantes[4].ci}) recorre 3 gestiones: ${trayectoria.map(t => `${t.gestion.anio} ${t.curso.grado}°`).join(' → ')}`)
 
     console.log('\nRESUMEN:')
     resumen.forEach(r => console.log(`  ${r}`))
@@ -350,7 +350,7 @@ export const mini: Perfil = {
       'director / admin1234 (Director + Docente) · secretaria / sec1234',
       'doc01, doc02 / doc1234 · est_v001..est_v006 / est1234 · tut_v001..tut_v003 / tut1234',
     ])
-    console.log('\nPRUEBAS SUGERIDAS: Cerrar el T3 de 2026 (B reprueba Matemáticas, F está retirado) · Promoción · Historial (V00005: 3 años; V00008: reprobado) · '
+    console.log(`\nPRUEBAS SUGERIDAS: Cerrar el T3 de 2026 (B reprueba Matemáticas, F está retirado) · Promoción · Historial (${estudiantes[4].nombre} ${estudiantes[4].apellido}, CI ${estudiantes[4].ci}: 3 años; ${estudiantes[7].nombre} ${estudiantes[7].apellido}, CI ${estudiantes[7].ci}: reprobado) · `
       + 'Comparativo 2024-2025-2026 · Asistencia (D con ~52 % en alertas) · Pagos (parcial, pendiente, anulado, sin pagar) · Entrar como "director" y cambiar entre vista Director y Docente.')
   },
 }

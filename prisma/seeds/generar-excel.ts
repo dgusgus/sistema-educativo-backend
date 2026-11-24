@@ -14,16 +14,16 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { generarExcel } from '../../src/lib/excel.helper.js'
+import { personaDe, type Espacio } from './datos-bolivia.js'
 
-const NOMBRES = ['Diego', 'Camila', 'Santiago', 'Fernanda', 'Mateo', 'Paola', 'Andrés', 'Daniela', 'Gabriel', 'Natalia', 'Cristián', 'Alejandra', 'Rodrigo', 'Carla', 'Felipe', 'María', 'José', 'Rosa', 'Luis', 'Elena']
-const APELLIDOS = ['Condori', 'Mamani', 'Quispe', 'Flores', 'Tarqui', 'Huanca', 'Choque', 'Apaza', 'Ticona', 'Cruz', 'Ramos', 'Vargas', 'Torres', 'Choquehuanca', 'Paco', 'Limachi']
 const CALLES = ['Av. Pagador', 'Calle Bolívar', 'Av. Cívica', 'Zona Los Ángeles', 'Urb. Bustillos', 'Calle Junín', 'Av. España', 'Zona Norte']
 const OCUPACIONES = ['Comerciante', 'Chofer', 'Costurera', 'Albañil', 'Enfermera', 'Agricultor', 'Artesana', 'Mecánico']
 const INSTRUCCION = ['Primaria', 'Secundaria', 'Técnico medio', 'Universitario']
 const ESPECIALIDADES = ['Matemáticas', 'Lenguaje y Literatura', 'Ciencias Naturales', 'Ciencias Sociales', 'Inglés', 'Educación Física', 'Artes Plásticas', 'Técnica Tecnológica']
 const HORAS = [5, 5, 4, 4, 3, 3, 2, 3]   // horas semanales por materia (mismo reparto que el perfil "carga": h+1 docentes por materia)
-const nombreDe = (i: number) => NOMBRES[i % NOMBRES.length]
-const apellidoDe = (i: number) => `${APELLIDOS[i % APELLIDOS.length]} ${APELLIDOS[(i * 5 + 3) % APELLIDOS.length]}`
+// Nombre y apellido salen del mismo generador que las semillas (únicos y realistas), no del CI.
+const nombreDe = (e: Espacio, i: number) => personaDe(e, i).nombre
+const apellidoDe = (e: Espacio, i: number) => personaDe(e, i).apellido
 const ANIO = new Date().getFullYear()
 const dir = process.argv[2] ?? 'prisma/seeds/excel'
 mkdirSync(dir, { recursive: true })
@@ -37,7 +37,7 @@ HORAS.forEach((h, mi) => {
   for (let k = 0; k <= h; k++) {
     const n = docentes.length + 1
     docentes.push({
-      CI: String(3000000 + n * 37), Nombre: nombreDe(n + 4), Apellido: apellidoDe(n + 40), Especialidad: ESPECIALIDADES[mi],
+      CI: String(3000000 + n * 37), Nombre: nombreDe('DOC', n), Apellido: apellidoDe('DOC', n), Especialidad: ESPECIALIDADES[mi],
       Email: `docente${String(n).padStart(2, '0')}@ueangeles.edu.bo`, Telefono: String(70100000 + n * 13),
     })
   }
@@ -52,7 +52,7 @@ cursos.forEach((c, ci) => {
   for (let k = 0; k < tam; k++) {
     const n = estudiantes.length + 1
     estudiantes.push({
-      CI: String(8000000 + n), Nombre: nombreDe(n), Apellido: apellidoDe(n),
+      CI: String(8000000 + n), Nombre: nombreDe('EST', n), Apellido: apellidoDe('EST', n),
       FechaNacimiento: new Date(Date.UTC(ANIO - 11 - c.grado - (n % 2), (n % 12), 1 + (n % 27))),
       Direccion: `${CALLES[n % CALLES.length]} ${100 + n}, Oruro`, RUDE: `${ANIO}${String(n).padStart(6, '0')}`,
       Curso: `${c.grado}${c.par}S`,
@@ -67,7 +67,7 @@ estudiantes.forEach((e, n) => {
   if (n % 7 === 6 && ultimo) { tutores.push({ ...ultimo, EstudianteCI: e.CI, Parentesco: 'MADRE' }); return }
   tutorN++
   ultimo = {
-    CI: String(6000000 + tutorN * 11), Nombre: nombreDe(tutorN * 3 + 1), Apellido: apellidoDe(tutorN * 7 + 2),
+    CI: String(6000000 + tutorN * 11), Nombre: nombreDe('TUT', tutorN), Apellido: apellidoDe('TUT', tutorN),
     Ocupacion: OCUPACIONES[tutorN % OCUPACIONES.length], GradoInstruccion: INSTRUCCION[tutorN % INSTRUCCION.length],
     Email: `tutor${String(tutorN).padStart(3, '0')}@correo.com`, Telefono: String(79100000 + tutorN),
     EstudianteCI: e.CI, Parentesco: tutorN % 2 ? 'MADRE' : 'PADRE',
@@ -76,7 +76,7 @@ estudiantes.forEach((e, n) => {
 })
 
 // ── Estudiantes con errores a propósito ─────────────────────────────────────
-const ok = (n: number, curso: string) => ({ CI: String(9000000 + n), Nombre: nombreDe(n), Apellido: apellidoDe(n), FechaNacimiento: new Date(Date.UTC(2011, 4, 10)), Direccion: 'Av. Pagador 100, Oruro', RUDE: `${ANIO}9${String(n).padStart(5, '0')}`, Curso: curso })
+const ok = (n: number, curso: string) => ({ CI: String(9000000 + n), Nombre: nombreDe('RET', n), Apellido: apellidoDe('RET', n), FechaNacimiento: new Date(Date.UTC(2011, 4, 10)), Direccion: 'Av. Pagador 100, Oruro', RUDE: `${ANIO}9${String(n).padStart(5, '0')}`, Curso: curso })
 const errores: Record<string, unknown>[] = [
   ok(1, '1AS'), ok(2, '2BS'), ok(3, '3CS'),
   { ...ok(4, '1AS'), CI: String(8000001) },                       // fila 5: CI ya existe (está en 2_estudiantes)
