@@ -160,14 +160,14 @@ const MOTIVOS_JUSTIFICACION = ['Certificado médico', 'Permiso familiar', 'Trám
 
 // ─── Estudiantes base heredados (casos de prueba del seed anterior) ──────────
 const BASE_1A = [
-  { username: 'est_ana',    ci: 'E001', nombre: 'Ana',    apellido: 'Condori Mamani' },
-  { username: 'est_pedro',  ci: 'E002', nombre: 'Pedro',  apellido: 'Huanca Quispe' },
-  { username: 'est_lucia',  ci: 'E003', nombre: 'Lucía',  apellido: 'Tarqui Flores' },
+  { username: 'est_v001',    ci: 'E001', nombre: 'Ana',    apellido: 'Condori Mamani' },
+  { username: 'est_v002',  ci: 'E002', nombre: 'Pedro',  apellido: 'Huanca Quispe' },
+  { username: 'est_v003',  ci: 'E003', nombre: 'Lucía',  apellido: 'Tarqui Flores' },
 ]
 const BASE_1B = [
-  { username: 'est_valeria', ci: 'E005', nombre: 'Valeria', apellido: 'Quispe Tarqui' },
+  { username: 'est_v005', ci: 'E005', nombre: 'Valeria', apellido: 'Quispe Tarqui' },
 ]
-const MIGUEL = { username: 'est_miguel', ci: 'E004', nombre: 'Miguel', apellido: 'Mamani Choque' }
+const MIGUEL = { username: 'est_v004', ci: 'E004', nombre: 'Miguel', apellido: 'Mamani Choque' }
 
 // Evita mezclar la demo con datos reales o con otra gestión (dos gestiones "activas" rompen la app).
 async function protegerBaseDeDatos() {
@@ -312,19 +312,19 @@ async function main() {
   const uSecretaria = await upsertUsuario('secretaria', HASH.sec,  ['SECRETARIA'])
   const U: Record<string, { id: number }> = {
     director: uDirector, secretaria: uSecretaria,
-    doc_mamani:  await upsertUsuario('doc_mamani',  HASH.doc, ['DOCENTE']),
-    doc_quispe:  await upsertUsuario('doc_quispe',  HASH.doc, ['DOCENTE']),
-    doc_flores:  await upsertUsuario('doc_flores',  HASH.doc, ['DOCENTE']),
-    doc_condori: await upsertUsuario('doc_condori', HASH.doc, ['DOCENTE']),
-    doc_rios:     await upsertUsuario('doc_rios',     HASH.doc, ['DOCENTE']),
-    doc_paredes:  await upsertUsuario('doc_paredes',  HASH.doc, ['DOCENTE']),
-    doc_soto:     await upsertUsuario('doc_soto',     HASH.doc, ['DOCENTE']),
-    doc_aliaga:   await upsertUsuario('doc_aliaga',   HASH.doc, ['DOCENTE']),
-    doc_libre:    await upsertUsuario('doc_libre',    HASH.doc, ['DOCENTE']),
-    tut_elena:    await upsertUsuario('tut_elena',    HASH.tut, ['TUTOR', 'DOCENTE']),
-    tut_rosa:     await upsertUsuario('tut_rosa',     HASH.tut, ['TUTOR']),
-    tut_miguel:   await upsertUsuario('tut_miguel',   HASH.tut, ['TUTOR']),
-    tut_carmen:   await upsertUsuario('tut_carmen',   HASH.tut, ['TUTOR']),
+    doc01:  await upsertUsuario('doc01',  HASH.doc, ['DOCENTE']),
+    doc02:  await upsertUsuario('doc02',  HASH.doc, ['DOCENTE']),
+    doc03:  await upsertUsuario('doc03',  HASH.doc, ['DOCENTE']),
+    doc04: await upsertUsuario('doc04', HASH.doc, ['DOCENTE']),
+    doc05:     await upsertUsuario('doc05',     HASH.doc, ['DOCENTE']),
+    doc06:  await upsertUsuario('doc06',  HASH.doc, ['DOCENTE']),
+    doc07:     await upsertUsuario('doc07',     HASH.doc, ['DOCENTE']),
+    doc08:   await upsertUsuario('doc08',   HASH.doc, ['DOCENTE']),
+    doc09:    await upsertUsuario('doc09',    HASH.doc, ['DOCENTE']),
+    tut_v004:    await upsertUsuario('tut_v004',    HASH.tut, ['TUTOR', 'DOCENTE']),
+    tut_v001:     await upsertUsuario('tut_v001',     HASH.tut, ['TUTOR']),
+    tut_v002:   await upsertUsuario('tut_v002',   HASH.tut, ['TUTOR']),
+    tut_v003:   await upsertUsuario('tut_v003',   HASH.tut, ['TUTOR']),
   }
 
   async function crearPersona(d: { ci: string; nombre: string; apellido: string; telefono?: string; email?: string; fechaNacimiento?: Date; direccion?: string }) {
@@ -342,15 +342,15 @@ async function main() {
   // Docentes: 5 heredados + 6 nuevos (libre sin carga, elena tutora-docente sin carga)
   const docSeed: Array<{ u: string; ci: string; nombre: string; apellido: string; esp: string; conCarga: boolean }> = [
     { u: 'director',    ci: 'D001',    nombre: 'Roberto', apellido: 'Vargas Mamani',  esp: 'Artes Plásticas',          conCarga: true },
-    { u: 'doc_mamani',  ci: '1234567', nombre: 'Juan',    apellido: 'Mamani Condori', esp: 'Matemáticas',              conCarga: true },
-    { u: 'doc_quispe',  ci: '2345678', nombre: 'María',   apellido: 'Quispe Tarqui',  esp: 'Lenguaje y Literatura',    conCarga: true },
-    { u: 'doc_flores',  ci: '3456789', nombre: 'Carlos',  apellido: 'Flores Huanca',  esp: 'Inglés y Ed. Física',      conCarga: true },
-    { u: 'doc_condori', ci: '4567890', nombre: 'Sofía',   apellido: 'Condori Mamani', esp: 'Ciencias Nat. y Sociales', conCarga: true },
-    { u: 'doc_rios',    ci: 'D2001',   nombre: 'Elena',   apellido: 'Ríos Paco',      esp: 'Educación Musical',        conCarga: true },
-    { u: 'doc_paredes', ci: 'D2002',   nombre: 'Marco',   apellido: 'Paredes Cruz',   esp: 'Artes Plásticas',          conCarga: true },
-    { u: 'doc_soto',    ci: 'D2003',   nombre: 'Nadia',   apellido: 'Soto Ramos',     esp: 'Técnica Tecnológica',      conCarga: true },
-    { u: 'doc_aliaga',  ci: 'D2004',   nombre: 'Pablo',   apellido: 'Aliaga Torres',  esp: 'Ciencias Sociales',        conCarga: true },
-    { u: 'doc_libre',   ci: 'D2005',   nombre: 'Ruth',    apellido: 'Limachi Apaza',  esp: 'Lenguaje',                 conCarga: false },
+    { u: 'doc01',  ci: '1234567', nombre: 'Juan',    apellido: 'Mamani Condori', esp: 'Matemáticas',              conCarga: true },
+    { u: 'doc02',  ci: '2345678', nombre: 'María',   apellido: 'Quispe Tarqui',  esp: 'Lenguaje y Literatura',    conCarga: true },
+    { u: 'doc03',  ci: '3456789', nombre: 'Carlos',  apellido: 'Flores Huanca',  esp: 'Inglés y Ed. Física',      conCarga: true },
+    { u: 'doc04', ci: '4567890', nombre: 'Sofía',   apellido: 'Condori Mamani', esp: 'Ciencias Nat. y Sociales', conCarga: true },
+    { u: 'doc05',    ci: 'D2001',   nombre: 'Elena',   apellido: 'Ríos Paco',      esp: 'Educación Musical',        conCarga: true },
+    { u: 'doc06', ci: 'D2002',   nombre: 'Marco',   apellido: 'Paredes Cruz',   esp: 'Artes Plásticas',          conCarga: true },
+    { u: 'doc07',    ci: 'D2003',   nombre: 'Nadia',   apellido: 'Soto Ramos',     esp: 'Técnica Tecnológica',      conCarga: true },
+    { u: 'doc08',  ci: 'D2004',   nombre: 'Pablo',   apellido: 'Aliaga Torres',  esp: 'Ciencias Sociales',        conCarga: true },
+    { u: 'doc09',   ci: 'D2005',   nombre: 'Ruth',    apellido: 'Limachi Apaza',  esp: 'Lenguaje',                 conCarga: false },
   ]
   const docentes: Record<string, { id: number }> = {}
   for (const d of docSeed) {
@@ -364,11 +364,11 @@ async function main() {
   const pElena = await crearPersona({ ci: 'T2001', nombre: 'Elena', apellido: 'Ticona Apaza', telefono: '79100001' })
   const tutElena = await prisma.tutor.upsert({
     where: { personaId: pElena.id }, update: {},
-    create: { personaId: pElena.id, usuarioId: U.tut_elena.id, ocupacion: 'Docente', gradoInstruccion: 'Superior', activo: true },
+    create: { personaId: pElena.id, usuarioId: U.tut_v004.id, ocupacion: 'Docente', gradoInstruccion: 'Superior', activo: true },
   })
   await prisma.docente.upsert({
     where: { personaId: pElena.id }, update: {},
-    create: { personaId: pElena.id, usuarioId: U.tut_elena.id, especialidad: 'Lenguaje', activo: true },
+    create: { personaId: pElena.id, usuarioId: U.tut_v004.id, especialidad: 'Lenguaje', activo: true },
   })
   console.log('✓ Usuarios base + 11 docentes (libre sin carga, elena tutora-docente)')
 
@@ -380,14 +380,14 @@ async function main() {
       create: { personaId: p.id, usuarioId: U[username].id, ocupacion, activo: true },
     })
   }
-  const tutRosa   = await crearTutor('T001', 'Rosa',   'Condori Mamani', 'tut_rosa',   'Comerciante')
-  const tutMiguel = await crearTutor('T002', 'Miguel', 'Huanca Torres',  'tut_miguel', 'Chofer')
-  const tutCarmen = await crearTutor('T003', 'Carmen', 'Tarqui Flores',  'tut_carmen', 'Costurera')
+  const tutRosa   = await crearTutor('T001', 'Rosa',   'Condori Mamani', 'tut_v001',   'Comerciante')
+  const tutMiguel = await crearTutor('T002', 'Miguel', 'Huanca Torres',  'tut_v002', 'Chofer')
+  const tutCarmen = await crearTutor('T003', 'Carmen', 'Tarqui Flores',  'tut_v003', 'Costurera')
 
   // ══════════════════════════════════════
   // ASIGNACIONES DMC: 12 cursos x 8 materias, rotando 9 docentes
   // ══════════════════════════════════════
-  const poolDocentes = ['doc_mamani', 'doc_quispe', 'doc_flores', 'doc_condori', 'doc_rios', 'doc_paredes', 'doc_soto', 'doc_aliaga', 'director']
+  const poolDocentes = ['doc01', 'doc02', 'doc03', 'doc04', 'doc05', 'doc06', 'doc07', 'doc08', 'director']
   const dmcs: Array<{ id: number; cursoIdx: number; materia: string; docenteId: number }> = []
   for (let ci = 0; ci < cursos.length; ci++) {
     for (let k = 0; k < MATS_ASIGNADAS.length; k++) {
@@ -516,7 +516,7 @@ async function main() {
       const nombre = NOMBRES[(gi * 7) % NOMBRES.length]
       const apellido = `${APELLIDOS[(gi * 5) % APELLIDOS.length]} ${APELLIDOS[(gi * 11 + 3) % APELLIDOS.length]}`
       await crearEstudiante({
-        username: `est_s${String(gi + 1).padStart(2, '0')}`, ci: `E${2001 + gi}`,
+        username: `est_v${String(gi + 1).padStart(3, '0')}`, ci: `E${2001 + gi}`,
         nombre, apellido, rude: `R${ANIO}${String(1000 + nRude++).padStart(4, '0')}`,
         cursoIdx: ci, fechaNac: `${String(1 + (gi % 12)).padStart(2, '0')}-15`,
       })
@@ -554,7 +554,7 @@ async function main() {
       continue
     }
     nTut++
-    const username = `tut_t${String(nTut).padStart(2, '0')}`
+    const username = `tut_v${String(nTut - 6).padStart(3, '0')}`
     const u = await upsertUsuario(username, HASH.tut, ['TUTOR'])
     const p = await crearPersona({ ci: `T${2000 + nTut}`, nombre: NOMBRES[(nTut * 3) % NOMBRES.length], apellido: `${APELLIDOS[(nTut * 7) % APELLIDOS.length]} ${APELLIDOS[(nTut * 13) % APELLIDOS.length]}`, telefono: `79${String(100000 + nTut)}` })
     const t = await prisma.tutor.upsert({
@@ -675,7 +675,7 @@ async function main() {
       const aid = actId.get(`${dmcMat1A.id}-${trimsAct[1].id}-${(dimsAct[dn] as { id: number }).id}`)!
       await prisma.notaActividad.upsert({
         where: { actividadEvaluativaId_inscripcionId: { actividadEvaluativaId: aid, inscripcionId: miguel.inscId } },
-        update: {}, create: { actividadEvaluativaId: aid, inscripcionId: miguel.inscId, nota: Math.round(dimMax[dn] * 0.45 * 100) / 100, registradoPorId: U.doc_mamani.id },
+        update: {}, create: { actividadEvaluativaId: aid, inscripcionId: miguel.inscId, nota: Math.round(dimMax[dn] * 0.45 * 100) / 100, registradoPorId: U.doc01.id },
       })
     }
     const calMig = await prisma.calificacion.upsert({
@@ -689,7 +689,7 @@ async function main() {
     for (const [dim, max] of dims) {
       await prisma.calificacionDimension.create({ data: { calificacionId: calMig.id, dimensionId: (dim as { id: number }).id, promedio: Math.round(0.5 * Number(max) * 100) / 100 } })
     }
-    await prisma.historialCalificacion.create({ data: { promedioAnterior: 45, promedioNuevo: 48, motivo: 'Revisión de prueba de recuperación', usuarioId: U.doc_mamani.id, calificacionId: calMig.id } })
+    await prisma.historialCalificacion.create({ data: { promedioAnterior: 45, promedioNuevo: 48, motivo: 'Revisión de prueba de recuperación', usuarioId: U.doc01.id, calificacionId: calMig.id } })
     await prisma.historialCalificacion.create({ data: { promedioAnterior: 48, promedioNuevo: 50, motivo: 'Segunda revisión autorizada por director', usuarioId: U.director.id, calificacionId: calMig.id } })
     console.log('✓ Historial Miguel (45→48→50)')
   }
@@ -880,9 +880,9 @@ async function main() {
   }
   const clave = (p: string) => (PASS_DEMO ? '<SEED_PASSWORD_DEMO>' : p)
   console.log(`  director/${clave('admin1234')} (DIRECTOR+DOCENTE) · secretaria/${clave('sec1234')}`)
-  console.log(`  doc_mamani|quispe|flores|condori|rios|paredes|soto|aliaga|libre / ${clave('doc1234')}`)
-  console.log(`  est_ana|est_pedro|est_lucia|est_miguel|est_valeria + est_s01.. / ${clave('est1234')}`)
-  console.log(`  tut_rosa|tut_miguel|tut_carmen|tut_elena(DOCENTE+TUTOR) + tut_t.. / ${clave('tut1234')}`)
+  console.log(`  doc01..doc09 / ${clave('doc1234')} (doc09 sin carga)`)
+  console.log(`  est_v001..est_v005 (ana, pedro, lucía, miguel RETIRADO, valeria) + est_v006.. / ${clave('est1234')}`)
+  console.log(`  tut_v001..tut_v003 · tut_v004 (DOCENTE+TUTOR) + tut_v005.. / ${clave('tut1234')}`)
   console.log('\nCASOS DE PRUEBA:')
   console.log('  Miguel → RETIRADO + historial MAT T1 (45→48→50)')
   console.log('  Valeria → sin pagos · Pedro → matrícula PARCIAL · 1 PENDIENTE · perfiles ~50% asistencia (con justificadas)')
