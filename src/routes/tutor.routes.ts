@@ -8,7 +8,8 @@ import {
 } from '../controllers/tutor.controller.js'
 import { requireRol }     from '../middlewares/rbac.middleware.js'
 import { uploadExcel }    from '../middlewares/upload.middleware.js'
-import { paramEntero } from '../middlewares/validate.middleware.js'
+import { paramEntero, validar } from '../middlewares/validate.middleware.js'
+import { listarTutoresQuerySchema } from '../schemas/persona.schema.js'
 const router = Router()
 
 // Un :id que no sea entero positivo responde 400 (antes: NaN → error 500 de Prisma)
@@ -25,7 +26,7 @@ router.post('/import', requireRol('DIRECTOR', 'SECRETARIA'), uploadExcel, import
 // para que "mis-vinculados" no se capture como id).
 router.get('/mis-vinculados', requireRol('TUTOR'), getMisVinculados)
 
-router.get('/',    requireRol('DIRECTOR', 'SECRETARIA'), getTutores)
+router.get('/',    requireRol('DIRECTOR', 'SECRETARIA'), validar({ query: listarTutoresQuerySchema }), getTutores)
 router.get('/:id', requireRol('DIRECTOR', 'SECRETARIA'), getTutorById)
 router.post('/',   requireRol('SECRETARIA', 'DIRECTOR'), createTutor)
 router.put('/:id', requireRol('SECRETARIA', 'DIRECTOR'), updateTutor)

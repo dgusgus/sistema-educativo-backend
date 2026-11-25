@@ -102,3 +102,11 @@ export const listarEstudiantesQuerySchema = z.object({
   ...paginacionSchema,
 })
 export type ListarEstudiantesQuery = z.infer<typeof listarEstudiantesQuerySchema>
+
+// ─── Listado de tutores (query string) ───────────────────────────────────────
+// Igual que estudiantes: con ?pagina= responde { data, meta }; sin ?pagina, el arreglo completo.
+export const listarTutoresQuerySchema = z.object({
+  search: z.string().trim().max(100, 'máximo 100 caracteres').optional(),
+  ...paginacionSchema,
+})
+export type ListarTutoresQuery = z.infer<typeof listarTutoresQuerySchema>

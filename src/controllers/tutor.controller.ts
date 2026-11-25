@@ -5,7 +5,8 @@ import type { PersonaInput } from '../lib/persona.helper.js'
 import { leerExcel, generarExcel, texto, type ColumnaImport } from '../lib/excel.helper.js'
 import { ejecutarImport, mensajeValidacion, sinTildes } from '../lib/import.helper.js'
 import { ErrorDeUsuario } from '../lib/errores.js'
-import { createTutorSchema } from '../schemas/persona.schema.js'
+import { createTutorSchema, type ListarTutoresQuery } from '../schemas/persona.schema.js'
+import { leerPaginacion, respuestaPaginada } from '../lib/paginacion.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 
 // tutor.controller.ts — agregar arriba del todo, junto a los imports
@@ -21,22 +22,33 @@ function normalizarParentesco(valor: string): ParentescoValido {
   return limpio as ParentescoValido
 }
 // GET /api/tutores
-export const getTutores = async (req: Request, res: Response): Promise<void> => {
-  const { search } = req.query as { search?: string }
+// Con ?pagina=1&limite=25 responde { data, meta } y busca/ordena en el servidor;
+// sin ?pagina responde el arreglo completo (lo usan las pantallas que necesitan todo).
+// La búsqueda admite varias palabras ("Rebeca Mir"): cada palabra debe aparecer en
+// nombre, apellido o CI.
+export const getTutores = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const q = req.query as unknown as ListarTutoresQuery
+  const palabras = (q.search ?? '').split(/\s+/).filter(Boolean).slice(0, 5)
 
-  try {
-    const tutores = await prisma.tutor.findMany({
-      where: search
-        ? {
-            persona: {
-              OR: [
-                { nombre:   { contains: search, mode: 'insensitive' } },
-                { apellido: { contains: search, mode: 'insensitive' } },
-                { ci:       { contains: search } },
-              ],
-            },
-          }
-        : undefined,
+  const where = palabras.length
+    ? {
+        AND: palabras.map(p => ({
+          persona: {
+            OR: [
+              { nombre:   { contains: p, mode: 'insensitive' as const } },
+              { apellido: { contains: p, mode: 'insensitive' as const } },
+              { ci:       { contains: p, mode: 'insensitive' as const } },
+            ],
+          },
+        })),
+      }
+    : undefined
+
+  const pagina = leerPaginacion(q)
+
+  const [tutores, total] = await Promise.all([
+    prisma.tutor.findMany({
+      where,
       include: {
         persona: true,
         estudiantes: {
@@ -48,21 +60,21 @@ export const getTutores = async (req: Request, res: Response): Promise<void> => 
         },
         usuario: { select: { id: true, username: true, activo: true } },
       },
-      orderBy: { persona: { apellido: 'asc' } },
-    })
+      orderBy: [{ persona: { apellido: 'asc' } }, { persona: { nombre: 'asc' } }, { id: 'asc' }],
+      ...(pagina && { skip: pagina.skip, take: pagina.take }),
+    }),
+    pagina ? prisma.tutor.count({ where }) : Promise.resolve(0),
+  ])
 
-    res.status(200).json(tutores.map(t => ({
-      ...aplanarPersona(t),
-      estudiantes: t.estudiantes.map(e => ({
-        ...e,
-        estudiante: { id: e.estudiante.id, ...e.estudiante.persona },
-      })),
-    })))
-  } catch (error) {
-    console.error('[tutor.getTutores]', error)
-    res.status(500).json({ error: 'Error interno del servidor' })
-  }
-}
+  const data = tutores.map(t => ({
+    ...aplanarPersona(t),
+    estudiantes: t.estudiantes.map(e => ({
+      ...e,
+      estudiante: { id: e.estudiante.id, ...e.estudiante.persona },
+    })),
+  }))
+  res.status(200).json(pagina ? respuestaPaginada(data, total, pagina) : data)
+})
 
 // GET /api/tutores/:id
 export const getTutorById = async (req: Request, res: Response): Promise<void> => {
